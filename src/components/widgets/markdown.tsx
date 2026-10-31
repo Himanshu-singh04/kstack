@@ -17,13 +17,15 @@
 // tag in it renders as the literal characters. `react-markdown` leaves raw HTML out
 // unless a rehype plugin puts it back — none is added.
 import { toJsxRuntime } from 'hast-util-to-jsx-runtime';
-import { Fragment, useEffect, useState } from 'react';
-import type { ComponentProps } from 'react';
+import { Check, Copy } from 'lucide-react';
+import { Fragment, isValidElement, useEffect, useRef, useState } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import '@/components/widgets/markdown.css';
+import { copyToClipboard } from '@/lib/clipboard';
 import { highlight, load, loaded } from '@/lib/highlight';
 
 type MarkdownProps = {
@@ -76,6 +78,45 @@ function Code({ className, children, ...p }: ComponentProps<'code'>) {
   );
 }
 
+function codeText(children: ReactNode): string {
+  if (!isValidElement<{ children?: ReactNode }>(children)) return '';
+  return typeof children.props.children === 'string' ? children.props.children : '';
+}
+
+function CodeBlock({ children, node: _node, ...p }: ComponentProps<'pre'> & { node?: unknown }) {
+  const [copied, setCopied] = useState(false);
+  const reset = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (reset.current !== null) clearTimeout(reset.current);
+    },
+    [],
+  );
+
+  const copy = () => {
+    copyToClipboard(codeText(children));
+    setCopied(true);
+    if (reset.current !== null) clearTimeout(reset.current);
+    reset.current = setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <div className="group/code relative my-2 rounded-md bg-muted">
+      <button
+        type="button"
+        aria-label={copied ? 'Copied' : 'Copy code'}
+        className="absolute top-2 right-2 rounded border border-border bg-background/90 p-1.5 text-muted-foreground opacity-0 shadow-sm transition-opacity group-hover/code:opacity-100 group-focus-within/code:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={copy}
+      >
+        {copied ? <Check aria-hidden="true" className="size-3.5" /> : <Copy aria-hidden="true" className="size-3.5" />}
+      </button>
+      <pre className="overflow-x-auto px-3 pt-10 pb-3 text-xs [&>code]:bg-transparent [&>code]:p-0" {...p}>
+        {children}
+      </pre>
+    </div>
+  );
+}
+
 const components = {
   a: Link,
   p: (p: ComponentProps<'p'>) => <p className="my-2 first:mt-0 last:mb-0" {...p} />,
@@ -117,9 +158,7 @@ const components = {
   ),
   hr: (p: ComponentProps<'hr'>) => <hr className="my-3 border-border" {...p} />,
   code: Code,
-  pre: (p: ComponentProps<'pre'>) => (
-    <pre className="my-2 overflow-x-auto rounded-md bg-muted p-3 text-xs [&>code]:bg-transparent [&>code]:p-0" {...p} />
-  ),
+  pre: CodeBlock,
   table: (p: ComponentProps<'table'>) => (
     <div className="my-2 overflow-x-auto">
       <table className="w-full border-collapse text-xs" {...p} />

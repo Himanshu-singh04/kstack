@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Markdown } from '@/components/widgets/markdown';
 
 describe('Markdown', () => {
+  beforeEach(() => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+  });
+
   it('renders markdown as elements', () => {
     render(<Markdown text={'# Pods\n\n- one\n- two\n\n`kubectl`'} />);
     expect(screen.getByRole('heading', { name: 'Pods' })).toBeInTheDocument();
@@ -85,6 +89,29 @@ describe('Markdown', () => {
     render(<Markdown text={'```\nkind: Pod\n```'} />);
     expect(document.querySelector('pre [class*="hljs-"]')).toBeNull();
     expect(screen.getByText('kind: Pod').closest('pre')).not.toBeNull();
+  });
+
+  it('copies a fence source verbatim', async () => {
+    render(<Markdown text={'```yaml\nkind: Pod\nmetadata:\n  name: api\n```'} />);
+    await waitFor(() => expect(document.querySelector('pre .hljs-attr')).toHaveTextContent('kind'));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('kind: Pod\nmetadata:\n  name: api\n');
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
+  });
+
+  it('does not offer to copy inline code', () => {
+    render(<Markdown text="Run `kubectl get pods`." />);
+    expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull();
+  });
+
+  it('clears the copied confirmation after 1.5 seconds', () => {
+    vi.useFakeTimers();
+    render(<Markdown text={'```\nkubectl get pods\n```'} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1500));
+    expect(screen.getByRole('button', { name: 'Copy code' })).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it('renders an unterminated fence mid-stream as a code block', () => {
