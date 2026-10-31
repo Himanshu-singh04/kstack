@@ -360,8 +360,7 @@ jobs:
         with:
           lycheeVersion: v0.24.2
           args: >-
-            --offline --include-fragments --no-progress
-            --exclude 'docs/specs/' --exclude '/docs/adr/path$'
+            --config .github/ci-config/lychee.toml
             --files-from '${{ runner.temp }}/markdown-files'
 
   typescript-lint:

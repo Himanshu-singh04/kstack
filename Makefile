@@ -123,8 +123,7 @@ lint-yaml:
 
 # Check local paths and anchors without making CI depend on the network.
 lint-md:
-	cargo install --locked lychee@0.24.2
-	git ls-files '*.md' | lychee --offline --include-fragments --no-progress --exclude 'docs/specs/' --exclude '/docs/adr/path$$' --files-from -
+	sh scripts/check-markdown-links.sh
 
 # Every coverage marker gives its reason.
 lint-markers:
