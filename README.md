@@ -48,7 +48,7 @@ sudo apt-get install -y bubblewrap passt
 
 ### VS Code
 
-Install the workspace's recommended extensions when prompted. They provide the repo's formatters and linters plus Go, Rust, Tailwind, GraphQL, Vitest, Tauri and TOML support.
+Install the workspace's recommended extensions when prompted. They provide the repo's formatters and linters plus Go, Rust, Tailwind, GraphQL, Vitest and Tauri support.
 
 ## Run
 

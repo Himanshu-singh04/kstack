@@ -8,7 +8,6 @@
     "vitest.explorer",
     "golang.go",
     "rust-lang.rust-analyzer",
-    "tamasfe.even-better-toml",
     "tauri-apps.tauri-vscode"
   ],
   "unwantedRecommendations": ["esbenp.prettier-vscode"]
