@@ -1,6 +1,10 @@
+// Config for the GraphQL editor extension. It reads codegen's schema and documents so the
+// editor validates exactly what `pnpm codegen` compiles.
+import codegen from './codegen';
+
 const config = {
-  schema: 'sidecar/graph/schema.graphqls',
-  documents: ['src/**/*.{ts,tsx}', '!src/gql/**', '!src/**/*.test.{ts,tsx}'],
+  schema: codegen.schema,
+  documents: codegen.documents,
 };
 
 export default config;

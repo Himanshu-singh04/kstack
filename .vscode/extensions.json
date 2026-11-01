@@ -9,7 +9,6 @@
     "golang.go",
     "rust-lang.rust-analyzer",
     "tamasfe.even-better-toml",
-    "bufbuild.vscode-buf",
     "tauri-apps.tauri-vscode"
   ],
   "unwantedRecommendations": ["esbenp.prettier-vscode"]
