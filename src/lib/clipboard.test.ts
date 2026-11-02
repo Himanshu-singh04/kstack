@@ -12,32 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+import { copyToClipboard } from './clipboard';
 
 const { reportError } = vi.hoisted(() => ({ reportError: vi.fn() }));
 vi.mock('@/lib/error-bus', () => ({ reportError }));
 
-const { copyToClipboard } = await import('./clipboard');
-
 describe('copyToClipboard', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  it('writes the text', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    copyToClipboard('text');
+    expect(writeText).toHaveBeenCalledWith('text');
   });
 
-  it.each([
-    [new Error('denied'), 'clipboard: write: denied'],
-    ['denied', 'clipboard: write: denied'],
-  ])('reports a rejected clipboard write', async (error, message) => {
+  it.each([new Error('denied'), 'denied'])('reports a refused write: %s', async (error) => {
     Object.assign(navigator, { clipboard: { writeText: vi.fn().mockRejectedValue(error) } });
-
     copyToClipboard('text');
-
     await vi.waitFor(() =>
-      expect(reportError).toHaveBeenCalledWith({
-        source: 'render',
-        message,
-        cause: error,
-      }),
+      expect(reportError).toHaveBeenCalledWith({ source: 'render', message: 'clipboard: write: denied', cause: error }),
     );
   });
 });

@@ -18,10 +18,10 @@
 // unless a rehype plugin puts it back — none is added.
 import { toJsxRuntime } from 'hast-util-to-jsx-runtime';
 import { Check, Copy } from 'lucide-react';
-import { Fragment, useEffect, useRef, useState } from 'react';
-import type { ComponentProps, ReactElement, ReactNode } from 'react';
+import { Fragment, useEffect, useState } from 'react';
+import type { ComponentProps } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type ExtraProps } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import '@/components/widgets/markdown.css';
@@ -33,6 +33,9 @@ type MarkdownProps = {
 };
 
 const remarkPlugins = [remarkGfm];
+
+// How long a fence's copy button shows the check after a click.
+const COPIED_FOR_MS = 1_500;
 
 // A link is drawn but never followed: the webview has no window to open a page in,
 // and the only URLs the host opens are ones it names itself.
@@ -78,26 +81,31 @@ function Code({ className, children, ...p }: ComponentProps<'code'>) {
   );
 }
 
-function codeText(children: ReactNode): string {
-  return (children as ReactElement<{ children: string }>).props.children;
+type Element = NonNullable<ExtraProps['node']>;
+type Text = Extract<Element['children'][number], { type: 'text' }>;
+
+// A fence's source, read off its hast node. react-markdown always passes the node,
+// and every fence is a `<pre>` over a `<code>` over one text node, an empty one too.
+function fenceSource(pre: Element): string {
+  const code = pre.children[0] as Element;
+  return (code.children[0] as Text).value;
 }
 
-function CodeBlock({ children, node: _node, ...p }: ComponentProps<'pre'> & { node?: unknown }) {
-  const [copied, setCopied] = useState(false);
-  const reset = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (reset.current !== null) clearTimeout(reset.current);
-    },
-    [],
-  );
+// A fence, with a button that copies its source. The check stays `COPIED_FOR_MS`
+// after the latest click; the count re-arms the timer on every one.
+function CodeBlock({ node, children, ...p }: ComponentProps<'pre'> & ExtraProps) {
+  const [copies, setCopies] = useState(0);
+  useEffect(() => {
+    if (copies === 0) return undefined;
+    const timer = setTimeout(() => setCopies(0), COPIED_FOR_MS);
+    return () => clearTimeout(timer);
+  }, [copies]);
 
   const copy = () => {
-    copyToClipboard(codeText(children));
-    setCopied(true);
-    if (reset.current !== null) clearTimeout(reset.current);
-    reset.current = setTimeout(() => setCopied(false), 1500);
+    copyToClipboard(fenceSource(node!));
+    setCopies((n) => n + 1);
   };
+  const copied = copies > 0;
 
   return (
     <div className="group/code relative my-2 rounded-md bg-muted">
