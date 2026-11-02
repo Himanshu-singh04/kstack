@@ -94,6 +94,8 @@ describe('Markdown', () => {
   it('copies a fence source verbatim', async () => {
     render(<Markdown text={'```yaml\nkind: Pod\nmetadata:\n  name: api\n```'} />);
     await waitFor(() => expect(document.querySelector('pre .hljs-attr')).toHaveTextContent('kind'));
+    expect(document.querySelector('pre')).toHaveClass('py-3', 'pr-12', 'pl-3');
+    expect(document.querySelector('pre')).not.toHaveClass('pt-10');
     fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('kind: Pod\nmetadata:\n  name: api\n');
     expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
@@ -104,12 +106,16 @@ describe('Markdown', () => {
     expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull();
   });
 
-  it('clears the copied confirmation after 1.5 seconds', () => {
+  it('keeps the copied confirmation for 1.5 seconds after the latest click', () => {
     vi.useFakeTimers();
     render(<Markdown text={'```\nkubectl get pods\n```'} />);
     fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
     expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(1500));
+    act(() => vi.advanceTimersByTime(1000));
+    fireEvent.click(screen.getByRole('button', { name: 'Copied' }));
+    act(() => vi.advanceTimersByTime(500));
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1000));
     expect(screen.getByRole('button', { name: 'Copy code' })).toBeInTheDocument();
     vi.useRealTimers();
   });

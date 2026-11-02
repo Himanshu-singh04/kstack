@@ -18,8 +18,8 @@
 // unless a rehype plugin puts it back — none is added.
 import { toJsxRuntime } from 'hast-util-to-jsx-runtime';
 import { Check, Copy } from 'lucide-react';
-import { Fragment, isValidElement, useEffect, useRef, useState } from 'react';
-import type { ComponentProps, ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
+import type { ComponentProps, ReactElement, ReactNode } from 'react';
 import { jsx, jsxs } from 'react/jsx-runtime';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -79,8 +79,7 @@ function Code({ className, children, ...p }: ComponentProps<'code'>) {
 }
 
 function codeText(children: ReactNode): string {
-  if (!isValidElement<{ children?: ReactNode }>(children)) return '';
-  return typeof children.props.children === 'string' ? children.props.children : '';
+  return (children as ReactElement<{ children: string }>).props.children;
 }
 
 function CodeBlock({ children, node: _node, ...p }: ComponentProps<'pre'> & { node?: unknown }) {
@@ -110,7 +109,7 @@ function CodeBlock({ children, node: _node, ...p }: ComponentProps<'pre'> & { no
       >
         {copied ? <Check aria-hidden="true" className="size-3.5" /> : <Copy aria-hidden="true" className="size-3.5" />}
       </button>
-      <pre className="overflow-x-auto px-3 pt-10 pb-3 text-xs [&>code]:bg-transparent [&>code]:p-0" {...p}>
+      <pre className="overflow-x-auto py-3 pr-12 pl-3 text-xs [&>code]:bg-transparent [&>code]:p-0" {...p}>
         {children}
       </pre>
     </div>
