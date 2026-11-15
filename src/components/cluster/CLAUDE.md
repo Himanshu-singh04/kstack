@@ -1,0 +1,37 @@
+# src/components/cluster — the cluster's controls
+
+The context omnibox (in `components/shell/`) and what it opens: the cluster picker, the status popover, the sync panel and the memory popover. Also owns `src/lib/`'s `cluster-health.ts`, `cluster-diagnostics.ts`, `kube-config.tsx` and `memories.tsx`. The webview-wide rules, security invariants first, are [`src/CLAUDE.md`](../../CLAUDE.md).
+
+## The context omnibox
+
+The **context omnibox** (`components/shell/context-omnibox/`, exporting the omnibox alone; `omnibox.tsx`) sits in the app bar's centre: the **`StatusButton`**, one trigger and the **`MemoryButton`**. The pill has no padding of its own, so a press anywhere but the two icon buttons lands on the trigger. With no kubeconfig context there is no status button, and the trigger draws the bare icon. → [ADR: the omnibox is the cluster picker](../../../docs/adr/2026-10-29-the-omnibox-is-the-cluster-picker.md).
+
+- **The trigger opens `ClusterPicker`** (`components/cluster/cluster-picker/`, exporting the picker alone), hung from the pill through **`OmniboxPopover`** (`cluster-picker/omnibox-popover.tsx`). It lists the kubeconfig's contexts, the window's first, each with `src/lib/cluster-health.ts`'s verdict (`contextHealth`: the Clusters dialog's own, *Not reached* without a record or before the clusters `Bookmark`); a filter appears from six contexts. A row switches the window's cluster; *Manage clusters…* in its footer is the one way to the Clusters dialog.
+- **The "Unverified TLS" badge** (`unverified-tls-badge.tsx`) rides beside the cluster it is about, on the trigger and on each picker row — the one way the app says a connection goes unverified.
+- **The memory button** rests gray and pulses primary once on each `useMemories` `lastSaved`; it opens **`MemoryPopover`** (*Memory* below).
+- `HistoryNav` walks router history via `__TSR_index` through `useSyncExternalStore`.
+
+## The status popover
+
+The status button is the server icon with the window's cluster's verdict as a dot in its corner. It opens **`ClusterStatusPopover`** (`components/cluster/cluster-status/`, exporting the popover alone; `popover.tsx`), a glance. **Every value is always drawn, a dash for a missing one.** Top to bottom:
+
+- A header with the context and the overall verdict as a pill.
+- Under an `error` connection tone, a destructive `Alert`: `connectionFailureSummary`'s words for the `Connected` reason as its title, then the condition's message and *N attempts · Retrying in D* off the schedule gauge, *Retrying now…* while a probe runs.
+- Under an `error` sync tone, one titled by `cacheFailureSummary` (a failed sync's `failure` class, such as *Permission denied*) over `syncReason`'s line.
+- Under a `Stale` sync, an amber one (`Alert` has no amber variant, so it takes `TONE.attention`'s shade), titled by the kinds not receiving updates (up to three by name, else a count), over a line saying the data shown may be out of date and Kstack restarts the watches until updates resume.
+- Three sections. *Kubeconfig*: context, server, user. *Connection*: its verdict, uptime (or downtime while down), download rate and its received-only sparkline, on a square-root scale, whose hovered sample shows its rate and age in a small tooltip centred over the chart. *Cache*: its verdict, with *Syncing (N/M)…* counting the unpaused kinds caught up and *Current · N paused* naming paused kinds, `syncReason`'s one line under any other `attention` tone, populated kinds, objects, last event.
+- A footer with *View details* left and `RetryButton` right: *Retry now*, held down as *Retrying…* while a probe runs, under an `error` connection tone; else *Reconnect*, held as *Reconnecting…* after a press and *Checking…* while any other probe runs.
+
+Around it:
+
+- **It shares the Clusters dialog's streams** (`useDataRate`, `useCacheContents`, `useNextCheck`, `src/lib/cluster-diagnostics.ts`), its sync wording (`syncReason`, `countLabel`, `src/lib/cluster-health.ts`) and its components (`RelativeTime`, `Countdown` and `RetryButton` in `primitives/`, `DataRateSparkline` in `cluster/`, each a file of its own). The schedule gauge (`useNextCheck`) is read once, in `ClusterStatus`, and handed down. The history stays in the Clusters dialog.
+- **Size.** It hangs below the server icon, left edges aligned, 320px wide and as tall as its content. When the window is shorter, the alerts and sections scroll between a fixed header and footer, so a long message never hides the footer's buttons. It neither resizes nor remembers a size.
+- *View details* calls `openDialog('clusters', { clusterId, pane })`. **`clusterDetail` is the one way a dialog opens with state**: `ClusterSyncPanel` (`components/cluster/cluster-sync-panel/`, its one export) reads it once as it mounts, opens that row's pane and scrolls to it, and every other open clears it.
+
+## The kubeconfig mirror
+
+**The sidecar mirrors the kubeconfig and draws no verdicts over it.** `status.source.kubeconfig.cluster` is `{ name, entry }` (`entry`: `server`, `insecureSkipTLSVerify`; null when undefined). `user` is the name alone — an authInfo entry holds credentials. **`tlsUnverifiedReason` in `src/lib/kube-config.tsx` is the one place that derives the badge**; a second inline copy is how the plain-`http` arm goes missing. → [ADR: status mirrors the kubeconfig](../../../docs/adr/2026-09-03-status-mirrors-the-kubeconfig.md).
+
+## Memory
+
+**Memory** (`useMemories(clusterID)`, `src/lib/memories.tsx`: `unshared`, the cluster's own first, then every cluster's, each by name — the model's order). **`MemoryPopover`** (`components/cluster/memory/popover.tsx`; the folder holds it, its instructions, list and writes, exporting the popover alone) is where the user reads and writes them. It shows the window's cluster alone: its instructions and its own memories, off its watch, leaving out the ones for every cluster that watch also carries. It hangs below the brain button, right edges aligned, 620px wide and 476px tall, capped at the room below; it neither resizes nor remembers a size. Its footer, drawn like the cluster status popover's, holds *Manage all memories*, which leads nowhere yet, and *Add memory*. The list (`list.tsx`) draws bodies as plain text, never markdown. Its editor derives a new memory's name from the body, folds a typed one to the slug rule as it is typed, and checks the body's size itself (`writes.ts`). The name stays a slug because it is the model's key. The editor holds its draft fixed against the watch, and saving one of Kstack's memories makes it the user's — which the editor says. The instructions block is local state; nothing stores it yet. → [ADR: memory is rows](../../../docs/adr/2026-09-24-memory-is-rows-scoped-to-a-cluster-or-every-cluster.md), [memory](../../../docs/security/2026-09-24-memory.md).
