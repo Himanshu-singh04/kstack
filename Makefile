@@ -10,7 +10,7 @@
 # No target names a file it makes.
 .PHONY: build-sidecar build-sidecar-dev build-bwrap build-pasta build-embedded-sources \
 	generate-proto generate-prompts generate-icons \
-	lint lint-go lint-rust lint-ts lint-tailwind lint-yaml lint-sh lint-md lint-markers lint-design \
+	lint lint-go lint-rust lint-ts lint-tailwind lint-yaml lint-sh lint-md lint-docs lint-markers lint-design \
 	design-status design-record \
 	vet vet-go vet-go-changed vet-rust \
 	test test-go test-rust test-ts test-changed test-livecache test-liveswitch \
@@ -69,7 +69,7 @@ generate-icons: ## Regenerate src-tauri/icons/, public/favicon.ico and src/asset
 	mkdir -p src/assets/icons
 	cp src-icons/app-light.svg src-icons/app-dark.svg src/assets/icons/
 
-lint: lint-go lint-rust lint-ts lint-tailwind lint-yaml lint-sh lint-md lint-markers lint-design ## Run every linter CI runs
+lint: lint-go lint-rust lint-ts lint-tailwind lint-yaml lint-sh lint-md lint-docs lint-markers lint-design ## Run every linter CI runs
 
 lint-go: ## Check the sidecar's and the CLI's Go formatting
 	@unformatted=$$(gofmt -l sidecar cli); \
@@ -105,6 +105,9 @@ lint-sh: ## Lint the shell scripts with shellcheck
 # Offline, so CI never depends on the network.
 lint-md: ## Check local paths and anchors in tracked Markdown
 	sh scripts/check-markdown-links.sh
+
+lint-docs: ## Check the size budgets of tracked CLAUDE.md guides
+	sh scripts/check-claude-md.sh
 
 lint-markers: ## Check every coverage marker gives its reason
 	sh scripts/check-coverage-markers.sh
