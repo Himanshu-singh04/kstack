@@ -326,8 +326,8 @@ jobs:
             --config .github/ci-config/lychee.toml
             --files-from '${{ runner.temp }}/markdown-files'
 
-  docs-lint:
-    name: Docs · Lint
+  claude-md-lint:
+    name: CLAUDE.md · Lint
     needs: changes
     runs-on: ubuntu-24.04
     steps:
@@ -335,7 +335,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Check guide size budgets
-        run: make lint-docs
+        run: make lint-claude-md
 
   design-lint:
     name: Design · Lint
