@@ -30,6 +30,7 @@ import { useMutation } from 'urql';
 
 import { LogsReadCard, LogsViewCard, LogsWatchCard } from '@/components/chat/log-cards';
 import { ModelDescription } from '@/components/chat/model-description';
+import { Elapsed } from '@/components/primitives/elapsed';
 import { Markdown } from '@/components/primitives/markdown';
 import { VisibleText } from '@/components/primitives/visible-text';
 import { FolderGrantForm } from '@/components/settings/folder-grant-form';
@@ -41,7 +42,6 @@ import { chatGrantsContext } from '@/lib/chat-grants';
 import { useChatOutbox } from '@/lib/chat-outbox';
 import {
   actionKindLabel,
-  contextOf,
   grantOffered,
   inFlight,
   isWaitingWrite,
@@ -61,6 +61,7 @@ import { modelOf, useModels } from '@/lib/models';
 import { cutText, descriptionLine } from '@/lib/visible-text';
 
 import { DiffBlock } from './diff-block';
+import { KubeQuery } from './kube-query';
 import { TurnActions } from './turn-actions';
 
 // How close to the end still counts as reading the end. Fixed, not a fraction of the
@@ -146,10 +147,10 @@ function Caret() {
 }
 
 // An answer's work: its thinking summary and the calls it made, under a line
-// naming how long the turn worked (*Thinking* until it settles). Untouched, it is
-// open while the answer is still all work — the pause it exists to fill — and
-// closed once text arrives. A click pins the reader's choice for as long as the
-// message stays mounted.
+// counting how long the turn has worked (*Working 8s*) until it settles, then
+// naming how long it did. Untouched, it is open while the answer is still all
+// work — the pause it exists to fill — and closed once text arrives. A click
+// pins the reader's choice for as long as the message stays mounted.
 function Work({
   summary,
   calls,
@@ -178,29 +179,15 @@ function Work({
         {finishedAt ? (
           `Worked for ${humanDuration(Date.parse(finishedAt) - Date.parse(createdAt))}`
         ) : (
-          <span className="animate-shimmer text-shimmer motion-reduce:animate-none">Thinking</span>
+          <span className="animate-shimmer text-shimmer motion-reduce:animate-none">
+            Working <Elapsed since={Date.parse(createdAt)} />
+          </span>
         )}
         <Caret />
       </summary>
       <div className="mt-2 flex flex-col gap-2">
         {summary !== '' && <Markdown text={summary} />}
         {calls}
-      </div>
-    </details>
-  );
-}
-
-// The context a question carries — the cluster card, the memory notes, the
-// workspace, the view and the sandbox — closed: it is there so the user can see
-// what the provider was told, at the message it rode, escapes and all. Plain text,
-// never markdown, with every invisible or reordering character spelled: its names
-// and selected lines came from the cluster.
-function ClusterContext({ card }: { card: string }) {
-  return (
-    <details className="mb-2">
-      <summary className="text-xs text-muted-foreground select-none">Context</summary>
-      <div className="mt-1 border-l-2 border-muted pl-3 text-xs whitespace-pre-wrap text-muted-foreground">
-        <VisibleText text={card} />
       </div>
     </details>
   );
@@ -692,14 +679,9 @@ function ToolCalls({
                 )}
                 <Caret />
               </summary>
-              <div className="flex flex-col gap-1.5 py-2">
+              <div className="flex flex-col gap-1.5 pt-0.5 pb-2">
                 {!open && changed}
-                {call.action?.kubeQuery && (
-                  <FoldedBlock
-                    text={call.action.kubeQuery.sql}
-                    className="border-l-2 border-muted pl-3 font-mono break-all whitespace-pre-wrap"
-                  />
-                )}
+                {call.action?.kubeQuery && <KubeQuery sql={call.action.kubeQuery.sql} output={call.output} />}
                 {call.action?.memory?.op === 'save' && call.status === 'Succeeded' && (
                   <MemoryKept body={call.action.memory.body} />
                 )}
@@ -715,6 +697,7 @@ function ToolCalls({
                     ends={ends}
                   />
                 ) : (
+                  !call.action?.kubeQuery &&
                   (targetInBody || call.output !== '') && (
                     <div className="flex flex-col gap-1.5 rounded-md bg-muted/60 px-3 py-2.5 font-mono leading-4.5">
                       {targetInBody && (
@@ -1396,7 +1379,6 @@ function Message({
   onAskAgain?: () => void;
 }) {
   const text = textOf(message.content);
-  const card = contextOf(message.content);
   const sources = sourcesOf(message.citations);
   const searches = searchesOf(message.toolCalls);
   const notices = noticesOf(message.content);
@@ -1424,12 +1406,11 @@ function Message({
     />
   );
   const mine = message.role === 'User';
+  const working = inFlight(message.status);
   // A message of notices alone is its lines and nothing else: there is no bubble.
-  // Its context, when the sandbox switch moved, is drawn above them.
   if (mine && text === '' && notices.length > 0) {
     return (
       <article>
-        {card !== '' && <ClusterContext card={card} />}
         <Notices notices={notices} />
       </article>
     );
@@ -1447,18 +1428,17 @@ function Message({
             : 'w-full px-1 pt-2 text-sm *:last:mb-0'
         }
       >
-        {mine && card !== '' && <ClusterContext card={card} />}
         {!mine && (message.thinking !== '' || worked.length > 0) && (
           <Work
             summary={message.thinking}
             calls={worked.length > 0 && toolCallsOf(worked)}
-            stillThinking={inFlight(message.status) && text === ''}
+            stillThinking={working && text === ''}
             createdAt={message.createdAt}
             finishedAt={message.finishedAt}
           />
         )}
         {mine ? text : <Markdown text={text} />}
-        {inFlight(message.status) && (
+        {working && (
           <span className="ml-1 inline-flex align-middle" role="status" aria-label="Answering">
             <Spinner size="sm" />
           </span>
@@ -1490,7 +1470,7 @@ function Message({
           <p className="mt-1 text-xs text-destructive">{message.error || 'The answer failed.'}</p>
         )}
       </div>
-      <TurnActions mine={mine} text={text} createdAt={message.createdAt} last={last} />
+      <TurnActions mine={mine} text={text} createdAt={message.createdAt} last={last} working={working} />
       {onAskAgain && (
         <Button type="button" variant="outline" size="xs" onClick={onAskAgain}>
           Ask again

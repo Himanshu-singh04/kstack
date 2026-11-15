@@ -30,9 +30,9 @@ vi.mock('@/lib/graphql/use-watch-subscription', async (importOriginal) => ({
 const {
   actionKindLabel,
   chatModeOf,
-  contextOf,
   grantOffered,
   noticesOf,
+  queryResultOf,
   ranSearch,
   searchesOf,
   sourcesOf,
@@ -352,23 +352,6 @@ describe('textOf', () => {
     expect(textOf([null, 'text', 42, { type: 'text' }, { type: 'text', text: 7 }, { type: 'text', text: 'ok' }])).toBe(
       'ok',
     );
-  });
-});
-
-describe('contextOf', () => {
-  it('is the card a question carries', () => {
-    expect(
-      contextOf([
-        { type: 'context', text: '<context>\n## Cluster\n\n```json\n{"context":"prod"}\n```\n</context>' },
-        { type: 'text', text: 'why?' },
-      ]),
-    ).toBe('<context>\n## Cluster\n\n```json\n{"context":"prod"}\n```\n</context>');
-  });
-
-  it('is empty for a question with none, and for content that is not blocks', () => {
-    expect(contextOf([{ type: 'text', text: 'why?' }])).toBe('');
-    expect(contextOf(undefined)).toBe('');
-    expect(contextOf({ type: 'context', text: 'not an array' })).toBe('');
   });
 });
 
@@ -771,5 +754,52 @@ describe('grantOffered', () => {
       };
       expect(grantOffered(task), status).toBe(false);
     });
+  });
+});
+
+describe('queryResultOf', () => {
+  const rows = {
+    cluster: 'prod',
+    freshness: { status: 'watching', reason: '' },
+    columns: ['name', 'n'],
+    more: true,
+    rows: [
+      ['a', 1],
+      ['b', null],
+    ],
+  };
+
+  it('reads an answer of rows', () => {
+    expect(queryResultOf(JSON.stringify(rows))).toEqual({
+      cluster: 'prod',
+      columns: ['name', 'n'],
+      rows: [
+        ['a', 1],
+        ['b', null],
+      ],
+      more: true,
+    });
+  });
+
+  it('reads a missing cluster or more as empty', () => {
+    expect(queryResultOf('{"columns":[],"rows":[]}')).toEqual({
+      cluster: '',
+      columns: [],
+      rows: [],
+      more: false,
+    });
+  });
+
+  it.each([
+    ['an error', '{"error":"sql","message":"no such column"}'],
+    ['a withheld answer', '{"cluster":"prod","freshness":{"status":"unknown"}}'],
+    ['a saved result', '<persisted-output>\nOutput too large\n</persisted-output>'],
+    ['JSON that is not an object', '[1]'],
+    ['JSON null', 'null'],
+    ['a column that is not a name', '{"columns":[1],"rows":[]}'],
+    ['a row of another width', '{"columns":["a"],"rows":[["x","y"]]}'],
+    ['a row that is not an array', '{"columns":["a"],"rows":["x"]}'],
+  ])('answers null for %s', (_, output) => {
+    expect(queryResultOf(output)).toBeNull();
   });
 });

@@ -679,56 +679,23 @@ describe('ChatTranscript', () => {
     expect(screen.getByText('No messages yet.')).toBeInTheDocument();
   });
 
-  describe('the context disclosure', () => {
-    const question = (content: ChatMessage['content']) => msg({ role: 'User', content });
-
-    it("draws a question's card closed", () => {
-      draw([
-        question([
-          { type: 'context', text: '<context>\n## Cluster\n\n```json\n{"context":"prod"}\n```\n</context>' },
+  it("draws a question's text and none of the context it carried", () => {
+    draw([
+      msg({
+        role: 'User',
+        content: [
+          { type: 'context', text: '## Cluster\n\n```json\n{"context":"prod"}\n```' },
           { type: 'text', text: 'why?' },
-        ]),
-      ]);
-      const disclosure = screen.getByText('Context').closest('details')!;
-      expect(disclosure).not.toHaveAttribute('open');
-      expect(disclosure).toHaveTextContent('{"context":"prod"}');
-      expect(screen.getByText('why?')).toBeInTheDocument();
-    });
-
-    it('draws nothing on a question without one', () => {
-      draw([question([{ type: 'text', text: 'why?' }])]);
-      expect(screen.queryByText('Context')).toBeNull();
-    });
-
-    it('shows the card as its characters, never markup', () => {
-      draw([
-        question([
-          { type: 'context', text: 'name: <b>prod</b>' },
-          { type: 'text', text: 'why?' },
-        ]),
-      ]);
-      const disclosure = screen.getByText('Context').closest('details')!;
-      expect(disclosure.querySelector('b')).toBeNull();
-      expect(disclosure).toHaveTextContent('name: <b>prod</b>');
-    });
-
-    // A selected line is the cluster's text, and JSON leaves a reordering
-    // character as it is.
-    it('spells a reordering character in a selected line', () => {
-      draw([
-        question([
-          { type: 'context', text: '## View\n\n```json\n{"selected":[{"message":"ok\u{202E}gnp.exe"}]}\n```' },
-          { type: 'text', text: "what's this?" },
-        ]),
-      ]);
-      const disclosure = screen.getByText('Context').closest('details')!;
-      expect(disclosure.querySelector('mark')).toHaveTextContent('\\u{202E}');
-    });
+        ],
+      }),
+    ]);
+    expect(screen.getByText('why?')).toBeInTheDocument();
+    expect(screen.queryByText(/"context":"prod"/)).toBeNull();
   });
 
   describe('the work disclosure', () => {
     // The disclosure is a <details>; its open attribute is the state under test.
-    const label = () => screen.getByText(/^(Thinking|Worked for .*)$/);
+    const label = () => screen.getByText(/^(Working .*|Worked for .*)$/);
     const disclosure = () => label().closest('details')!;
     const redraw = (rerender: (ui: ReactNode) => void, messages: ChatMessage[]) =>
       rerender(wrap(<ChatTranscript messages={messages} phase="live" mode="chat" chatID="c1" clusterID="1" />));
@@ -741,9 +708,13 @@ describe('ChatTranscript', () => {
     const settled = (over: Partial<ChatMessage> = {}) =>
       msg({ thinking: 'the pod question', finishedAt: FINISHED, ...over });
 
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it('is absent on an answer with no summary and no calls', () => {
       draw([msg({ finishedAt: FINISHED })]);
-      expect(screen.queryByText(/^(Thinking|Worked for .*)$/)).toBeNull();
+      expect(screen.queryByText(/^(Working .*|Worked for .*)$/)).toBeNull();
     });
 
     // The calls an answer made are its work: they fold away with the summary, and
@@ -788,12 +759,25 @@ describe('ChatTranscript', () => {
       expect(disclosure().querySelector('strong')).toHaveTextContent('bold');
     });
 
-    it('reads Thinking while the turn runs and how long it worked once it settles', () => {
+    it('counts how long the turn has worked, then says how long it worked', async () => {
+      // 8 seconds after `msg`'s createdAt.
+      vi.useFakeTimers({ now: Date.parse('2026-11-15T10:00:08Z'), toFake: ['Date', 'setInterval', 'clearInterval'] });
       const { rerender } = draw([thinkingOnly()]);
-      expect(label()).toHaveTextContent('Thinking');
+      expect(label()).toHaveTextContent('Working 8s');
+
+      await act(() => vi.advanceTimersByTimeAsync(2000));
+      expect(label()).toHaveTextContent('Working 10s');
 
       redraw(rerender, [settled()]);
       expect(label()).toHaveTextContent('Worked for 14s');
+    });
+
+    it("draws the answer's actions only once its turn finishes", () => {
+      const { rerender } = draw([withText()]);
+      expect(screen.queryByRole('button', { name: 'Copy answer' })).toBeNull();
+
+      redraw(rerender, [settled()]);
+      expect(screen.getByRole('button', { name: 'Copy answer' })).toBeInTheDocument();
     });
 
     // The pause before the first word is what it exists to fill.
@@ -1812,8 +1796,8 @@ describe('ChatTranscript', () => {
     });
 
     // A query asks no one: it reads as Query with the model's description, and its
-    // body is the SQL, folded, above what the model read.
-    it('draws a KubeQuery call as Query, its description, then its SQL above its output', () => {
+    // body is the SQL above the rows the model read.
+    it('draws a KubeQuery call as Query, its description, then its SQL above its rows', () => {
       const sql = "SELECT namespace, name FROM objects WHERE status = 'CrashLoopBackOff'";
       draw([
         msg({
@@ -1838,7 +1822,8 @@ describe('ChatTranscript', () => {
                 logsWatch: null,
               },
               approval: null,
-              output: '{"cluster":"prod","freshness":{"status":"watching"}}',
+              output:
+                '{"cluster":"prod","freshness":{"status":"watching"},"columns":["namespace","name"],"more":false,"rows":[["default","worker"]]}',
             }),
           ],
         }),
@@ -1847,10 +1832,11 @@ describe('ChatTranscript', () => {
       const head = details.querySelector('summary')!;
       expect(head.querySelector('.font-medium')).toHaveTextContent(/^Query$/);
       expect(head).toHaveTextContent('Pods in a crash loop');
-      const [query, output] = details.querySelectorAll('pre');
-      expect(query).toHaveTextContent(sql);
-      expect(query).toHaveClass('font-mono');
-      expect(output).toHaveTextContent('"cluster":"prod"');
+      const pres = details.querySelectorAll('pre');
+      expect(pres).toHaveLength(1);
+      expect(pres[0]).toHaveTextContent(sql);
+      expect(within(details as HTMLElement).getByRole('cell', { name: 'worker' })).toBeInTheDocument();
+      expect(details).toHaveTextContent('1 row · prod');
       expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
     });
 
@@ -3784,13 +3770,11 @@ describe('ChatTranscript', () => {
       expect(screen.getByText('make serve')).toBeInTheDocument();
     });
 
-    it("draws a notice-only message's context above its lines", () => {
+    it("draws a notice-only message's lines and none of its context", () => {
       const context = { type: 'context', text: '## Sandbox\n\n```json\n{"commands":"outside"}\n```' };
       draw([msg({ id: 'n1', seq: 3, role: 'User', content: [context, notice()] })]);
-      const disclosure = screen.getByText('Context');
-      const line = screen.getByText(/Background command finished · exit 0/);
-      expect(disclosure.compareDocumentPosition(line)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-      expect(line.closest('.bg-muted')).toBeNull();
+      expect(screen.getByText(/Background command finished · exit 0/)).toBeInTheDocument();
+      expect(screen.queryByText(/"commands":"outside"/)).toBeNull();
     });
 
     it('says so when an agent started the command', () => {

@@ -407,14 +407,6 @@ function isTextBlock(block: unknown): block is TextBlock {
   return type === 'text' && typeof text === 'string';
 }
 
-type ContextBlock = { type: 'context'; text: string };
-
-function isContextBlock(block: unknown): block is ContextBlock {
-  if (typeof block !== 'object' || block === null) return false;
-  const { type, text } = block as { type?: unknown; text?: unknown };
-  return type === 'context' && typeof text === 'string';
-}
-
 function isToolBlock(block: unknown): boolean {
   if (typeof block !== 'object' || block === null) return false;
   const { type } = block as { type?: unknown };
@@ -533,16 +525,6 @@ export function sourcesOf(citations: readonly ChatCitation[]): Source[] {
 }
 
 /**
- * The cluster card a question carries — what the app told the model about the
- * cluster on that turn — or '' for a question without one. The one reader of a
- * context block.
- */
-export function contextOf(content: unknown): string {
-  if (!Array.isArray(content)) return '';
-  return content.find(isContextBlock)?.text ?? '';
-}
-
-/**
  * One request waiting on the user: a call's own, or a cluster write its
  * sandboxed command sent, which `change` holds (null for a call's own).
  */
@@ -648,4 +630,33 @@ export function noticesOf(content: unknown): TaskNotice[] {
       } as TaskNotice,
     ];
   });
+}
+
+/** What a KubeQuery call answered: the cluster it read and the rows. */
+export type QueryResult = {
+  cluster: string;
+  columns: string[];
+  /** Each row's cells as the sidecar rendered them: strings, numbers, null, or JSON. */
+  rows: unknown[][];
+  /** Whether rows were left out past the limit or the answer's size. */
+  more: boolean;
+};
+
+/**
+ * A KubeQuery call's output as rows, or null for any answer that is not rows: an
+ * error, a cache that withheld them, or a result saved to a file. The one reader of
+ * a query's output; the caller draws the output as text when it answers null.
+ */
+export function queryResultOf(output: string): QueryResult | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const { cluster, columns, rows, more } = parsed as Record<string, unknown>;
+  if (!Array.isArray(columns) || !columns.every((c) => typeof c === 'string')) return null;
+  if (!Array.isArray(rows) || !rows.every((r) => Array.isArray(r) && r.length === columns.length)) return null;
+  return { cluster: stringOr(cluster), columns, rows: rows as unknown[][], more: more === true };
 }
