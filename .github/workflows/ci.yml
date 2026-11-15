@@ -236,7 +236,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -262,7 +262,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.pull-request-legs) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 55
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -339,6 +339,7 @@ jobs:
     name: CLAUDE.md · Lint
     needs: changes
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -401,7 +402,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.legs) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       # The whole history, so every file has the commit that last changed it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -532,7 +533,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.legs) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
