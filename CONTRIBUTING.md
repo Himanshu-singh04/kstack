@@ -156,7 +156,7 @@ Follow the [PR template](./.github/pull_request_template.md). Your PR should inc
 - **A bug**: use the [bug report template](./.github/ISSUE_TEMPLATE/bug_report.md)
 - **A feature idea**: use the [feature request template](./.github/ISSUE_TEMPLATE/feature_request.md)
 
-Larger changes start as a spec. Open it as a PR labelled `spec`, titled `📜 Spec: …`, with `gh pr create --template spec.md`. See [`docs/specs/README.md`](./docs/specs/README.md) for how a spec moves to implementation.
+Larger changes start as a spec. Open it as a PR titled `📜 Spec: …`, with `gh pr create --template spec.md`. See [`docs/specs/README.md`](./docs/specs/README.md) for how a spec moves to implementation.
 
 ## Branch Naming Guidelines
 

@@ -16,7 +16,6 @@ Ref #
 ## Checklist
 
 - [ ] Title is `📜 Spec: <what it builds>`
-- [ ] Opened as a draft, labelled `spec`
 - [ ] The issue it answers is linked above
 - [ ] Named for its shape, per *Naming* in `docs/specs/README.md`
 - [ ] A security spec's `TODO.md` line links this PR
