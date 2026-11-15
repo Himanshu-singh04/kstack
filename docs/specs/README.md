@@ -11,10 +11,10 @@ design was chosen. A spec says what comes next.
 **A spec never reaches `main`.** It lives on a pull request, then on a `wip/<topic>` branch of
 this repository, and is deleted in the PR that lands its code:
 
-1. **Propose.** Add the spec on a branch of your fork, open a draft PR into `main` titled
-   `📜 Spec: <what it builds>`, labelled `spec`, and link the issue it answers. The spec is
+1. **Propose.** Add the spec on a branch of your fork, open a PR into `main` titled
+   `📜 Spec: <what it builds>`, and link the issue it answers. The spec is
    reviewed there, line by line. Use the spec PR template:
-   `gh pr create --draft --template spec.md`, or add `?template=spec.md` to the compare URL.
+   `gh pr create --template spec.md`, or add `?template=spec.md` to the compare URL.
 2. **Accept.** A maintainer creates `wip/<topic>` from `main`, retargets the spec PR to it and
    merges it. They then open a draft PR from `wip/<topic>` into `main`, which shows the whole
    change as it grows.
@@ -28,7 +28,7 @@ How `wip/<topic>` keeps up with `main`, and whether it lands as a squash, a reba
 commit, is the maintainers' call for each piece of work. A rebase rewrites the branch under any
 open PR, so warn their authors first.
 
-The open `spec` PRs are the proposals; the open PRs from `wip/*` are the work in progress.
+The open PRs titled `📜 Spec:` are the proposals; the open PRs from `wip/*` are the work in progress.
 
 Whether something is worth building is settled before its spec, in an issue, or in a Discussion
 for an open-ended proposal. A security spec's gap keeps its line in [`TODO.md`](../TODO.md#security),
@@ -88,5 +88,5 @@ root `CLAUDE.md`. All commands below run from the repository root unless explici
 
 ## Index
 
-Proposed: the open spec PRs, [`is:pr is:open label:spec`](https://github.com/kstackhq/kstack/pulls?q=is%3Apr+is%3Aopen+label%3Aspec).
+Proposed: the open spec PRs, [`is:pr is:open "📜 Spec:" in:title`](https://github.com/kstackhq/kstack/pulls?q=is%3Apr+is%3Aopen+%22%F0%9F%93%9C+Spec%3A%22+in%3Atitle).
 In progress: the open PRs from a `wip/<topic>` branch into `main`.
