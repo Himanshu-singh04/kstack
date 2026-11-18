@@ -159,6 +159,9 @@ Full picture: [`docs/security-model.md`](../docs/security-model.md).
   tokens.
 - **Restored identity is display-only.** Keep `UnverifiedIdentity` and `Authenticated` out of
   authorization.
+- **The sidecar runs the user's `az`** (`services/azureauth`), off `PATH`, with fixed arguments but
+  for a tenant the account holds; its output is never logged or kept, and a token it gives is held
+  in memory under `safe.AddSecret`. It runs no earlier than a run that mounts Azure.
 
 ## Memory (`internal/services/memory`)
 
@@ -170,6 +173,20 @@ information.** → [ADR: memory is
 rows](../docs/adr/2026-09-24-memory-is-rows-scoped-to-a-cluster-or-every-cluster.md), [security
 record](../docs/security/2026-09-24-memory.md).
 
+## Azure (`internal/services/azureauth`)
+
+**The user's `az` login, for Azure's mount**, in `run/azureproxy`'s types. `Account` discovers it
+(`az version`, `az account list`, `az cloud show`) when a run first asks, and again once `azureProfile.json`,
+`config` or `clouds.config` changes. One discovery runs at a time, apart from any run's context: a
+run with no account waits for it until its own context ends, one with an account does not. A
+discovery whose `az` did not run to an answer (`ErrNotRun`: none found, or cut off at its bound)
+keeps nothing; an `az` before 2.73, which asks IMDS, is no login. `Token` runs `az account
+get-access-token` per tenant, one at a time, kept until five minutes before expiry (`expires_on`,
+else `expiresOn` from an `az` before 2.54); `Drop` forgets one Azure answered `401`. **Each
+discovery drops every held token**, and a token `az` gave while one completed is not kept: the user
+may have signed in as someone else. Every failure is `ErrNoToken`. →
+[ADR](../docs/adr/2026-11-17-a-sandboxed-command-reaches-azure-through-a-token-injecting-proxy.md).
+
 ## Auth / identity (`internal/services/auth`)
 
 Local-first accounts against kstack-cloud's Hydra: system browser (auth-code + PKCE, loopback redirect), verification via go-oidc, refresh token in the OS keyring. Signed-in ⇔ refresh token present; works offline; degrades to signed-out when unconfigured. → [ADR: local-first auth](../docs/adr/2026-08-09-local-first-auth-settings.md).
@@ -177,6 +194,14 @@ Local-first accounts against kstack-cloud's Hydra: system browser (auth-code + P
 - Flat root package by file: `auth.go`, `grant.go` (token set as source of truth, lazy refresh with burst-dedup, persist-before-cache), `login.go`, `keyring.go`. `auth/oauth` is a leaf that must not import `auth`.
 - `Config` carries production knobs only; test seams are unexported options on `newWithOptions`. `Logout` clears locally first, revokes fire-and-forget.
 - `TokenSource(ctx)` is nil when degraded; consumers read `AccessToken` only. The GraphQL projection drops tokens.
+
+## GitHub's token (`internal/services/githubauth`)
+
+**The user's GitHub token, for GitHub's proxy alone.** `Token` runs `gh auth token --hostname
+github.com` on the sidecar's `PATH` on first use (no stdin, prompts off, killed past 10 s), holds it
+five minutes under `safe.AddSecret` and never writes or logs it. `gh` runs at most once a minute:
+a failure is held that long, and `Refused` (an upstream `401`) drops the token only a minute after
+the last run. Concurrent reads share one run; the exec is a field.
 
 ## Kubeconfig (`internal/services/kubeconfig`)
 
@@ -187,6 +212,36 @@ Local-first accounts against kstack-cloud's Hydra: system browser (auth-code + P
 **A merge with no contexts at all is never published**, since `clientcmd` truncates before it writes. A reload stats the chain before and after its load and drops a load any file changed under.
 
 Watches are pull-first: a 30-minute backstop tick under fsnotify and a poke subscription. **Keep the tick under any new push layer.** Use `resolvePaths` and keep every path in one namespace (no `filepath.EvalSymlinks`, which matches nothing on macOS).
+
+## AWS login (`internal/services/awsauth`)
+
+**The user's AWS credentials**, for `run/awsproxy`: the SDK's default chain in the sidecar's
+environment, resolved through its cache only when a request needs them. A chain is fixed at load,
+so the configuration is loaded again after a load yields none, a retrieval fails or a `Drop`: a
+profile the user creates, or keys they replace, need no restart. It holds the secret key and
+session token under `safe.AddSecret`, forgets them on refresh or `Drop`, and answers every failure
+as `ErrNoLogin`, never the SDK's text.
+
+**Each retrieval and each `Drop` takes one turn**, so what `safe` blanks is always what the cache
+last answered. A retrieval loads its chain in the turn, and holds the turn until the SDK's refresh
+ends, even once its caller has given up, or until `retrieveTimeout`, after which its chain is
+unloaded.
+
+**A `credential_process` runs quiet** (`process_unix.go`): no stdin, no stderr, since the host logs
+the sidecar's stderr as is, and in a session of its own, so it has no terminal to prompt on. The
+SDK's timeout kills its process group, and a descendant that left the group is waited for no
+longer than `helperWaitDelay`. A role assumed from a source profile's process is no login, since
+the SDK runs that one with the sidecar's own. The package is built for Unix alone
+(`awsauth_unix.go`): Windows has no sandbox to reach AWS from.
+
+## Google Cloud token (`internal/services/gcpauth`)
+
+**The user's Google access token, for `run/gcpproxy`.** `Source` runs `gcloud config config-helper`
+off the sidecar's `PATH`, as `gke-gcloud-auth-plugin` does: no earlier than a run's mount with
+`sandbox.gcp` on. It holds the token until a minute before expiry and a failure for 30 s, shares one
+run among callers, and registers the token with `safe` until it expires. The read after a `Drop`
+forces gcloud to refresh, which otherwise answers its own cached token. Its stderr is never read.
+→ [ADR](../docs/adr/2026-11-17-google-cloud-is-reached-with-the-active-gcloud-accounts-token.md).
 
 ## Resync broadcaster (`internal/services/poke`)
 

@@ -464,7 +464,7 @@ func tool(t *testing.T) *Tool {
 	t.Helper()
 	t.Setenv("SHELL", "")
 	k := kstackDirs(t)
-	tl, ok := New(Paths{ShellDir: filepath.Join(k.runtime, "shell")}, 0, nil, nil, nil)
+	tl, ok := New(Paths{ShellDir: filepath.Join(k.runtime, "shell")}, 0, nil, nil, nil, Cloud{})
 	if !ok {
 		t.Skip("no bash found on this machine")
 	}
@@ -631,14 +631,14 @@ func (f *fakeSandboxer) seen() []sandbox.Run {
 // through a nil pointer: Bash is offered as it is on a machine with none.
 func TestNewTakesNoSandboxAsNone(t *testing.T) {
 	t.Setenv("SHELL", "")
-	none, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil)
+	none, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, Cloud{})
 	if !ok {
 		t.Skip("no bash found on this machine")
 	}
 	assert.Nil(t, none.sandboxer)
 	assert.JSONEq(t, string(unsandboxedSchema), string(none.Definition().InputSchema))
 
-	some, ok := New(Paths{ShellDir: t.TempDir()}, 0, &sandbox.Sandbox{}, nil, nil)
+	some, ok := New(Paths{ShellDir: t.TempDir()}, 0, &sandbox.Sandbox{}, nil, nil, Cloud{})
 	require.True(t, ok)
 	assert.NotNil(t, some.sandboxer)
 	assert.JSONEq(t, string(inputSchema), string(some.Definition().InputSchema))
@@ -679,7 +679,7 @@ func TestTheToolsHomeIsTheUsers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	tl, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil)
+	tl, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, Cloud{})
 	if !ok {
 		t.Skip("no bash found on this machine")
 	}
@@ -692,7 +692,7 @@ func TestNewSweepsWhatACrashLeft(t *testing.T) {
 	left := filepath.Join(shell, "cmd-left-behind")
 	require.NoError(t, os.MkdirAll(shell, 0o700))
 	require.NoError(t, os.WriteFile(left, []byte("x"), 0o400))
-	if _, ok := New(Paths{ShellDir: shell}, 0, nil, nil, nil); !ok {
+	if _, ok := New(Paths{ShellDir: shell}, 0, nil, nil, nil, Cloud{}); !ok {
 		t.Skip("no bash found on this machine")
 	}
 	_, err := os.Stat(left)
@@ -1140,7 +1140,9 @@ func TestThePromptOpensWithTheSandboxWhenThereIsOne(t *testing.T) {
 	assert.Contains(t, sandboxPrompt, "The sandbox reaches the internet only when the context says its `network` is on.")
 	assert.Contains(t, sandboxPrompt, "A command that needs it otherwise can set `network: true`, which asks the user to approve that command; "+
 		"a refusal is their decision.")
-	assert.Contains(t, sandboxPrompt, "With the internet a command still holds no credential, so `gh`, `aws` and a private registry have no login.")
+	assert.Contains(t, sandboxPrompt, "With the internet a command still holds no credential, so a tool has a login only where the context's `cloud` names its cloud platform, and a private registry has none.")
+	assert.Contains(t, sandboxPrompt, "Where the context's `cloud` names a cloud platform, its tools reach it as the user through a proxy, with the internet or without.")
+	assert.Contains(t, sandboxPrompt, "A change waits for the user to approve it each time, or comes back refused, which is the user's decision; a background command changes nothing. A request whose answer is a credential is refused.")
 	assert.NotContains(t, sandboxPrompt, "is for a command run outside the sandbox", "the dry-run advice holds in the sandbox too")
 	assert.Contains(t, sandboxPrompt, "It has the user's tools and none of their shell's functions, aliases or variables; "+
 		"`HOME` is the workspace; `sudo` does not work.", "what a sandboxed run starts from")
@@ -1151,6 +1153,14 @@ func TestThePromptOpensWithTheSandboxWhenThereIsOne(t *testing.T) {
 	assert.NotContains(t, sandboxPrompt, "you can leave")
 	assert.Equal(t, 1, strings.Count(got, "## Bash"))
 	assert.NotContains(t, got, "snap")
+}
+
+// Azure's paragraph says what is Azure's own, after what holds for every
+// cloud platform.
+func TestTheSandboxPromptSaysWhatIsAzures(t *testing.T) {
+	assert.Contains(t, sandboxPrompt, "Where `cloud` names `azure`, `az` reaches Azure Resource Manager alone.")
+	assert.Contains(t, sandboxPrompt, "Storage data, Key Vault secrets, `az ad` and `az login` do not work there")
+	assert.Less(t, strings.Index(sandboxPrompt, "names a cloud platform"), strings.Index(sandboxPrompt, "names `azure`"))
 }
 
 // On Linux the sandbox's section goes on to say a snap's program does not run
@@ -1322,4 +1332,26 @@ func TestThePromptSaysWhatAnAllowKeeps(t *testing.T) {
 	assert.Contains(t, sandboxPrompt, "A change allowed for this chat, or always, runs unasked the next time a foreground command sends one in the same context and namespace")
 	assert.Contains(t, sandboxPrompt, "one allowed for the command runs unasked for the rest of that command alone.")
 	assert.Contains(t, sandboxPrompt, "a change from a background command come back `Forbidden`")
+}
+
+// The AWS paragraph says only what is AWS's own.
+func TestTheSandboxPromptSaysWhatIsAWSsOwn(t *testing.T) {
+	assert.Contains(t, sandboxPrompt, "Where `cloud` names `aws`, `aws` and AWS SDK clients reach the user's AWS account.")
+	assert.Contains(t, sandboxPrompt, "The run has one profile, the user's, so pass no `--profile`; pass `--region` when a command says no region is set.")
+	assert.Contains(t, sandboxPrompt, "Reading an object's contents asks like a change, and so does a read that names another account's bucket, registry or template URL")
+	assert.Contains(t, sandboxPrompt, "every bucket read asks when the login cannot list its own buckets.")
+	assert.Contains(t, sandboxPrompt, "`aws eks get-token`, `aws sts assume-role`, ECR logins and uploading a file to S3 do not work")
+	assert.Contains(t, sandboxPrompt, "A service the proxy does not reach is refused by name")
+}
+
+// GitHub's paragraph says only what is GitHub's, after the one every cloud
+// platform shares.
+func TestTheSandboxPromptSaysWhenToReadGitHub(t *testing.T) {
+	t.Parallel()
+	assert.Contains(t, sandboxPrompt, "Where `cloud` names `github`, `git` and `gh` reach `github.com`, and a push is a change.")
+	assert.Contains(t, sandboxPrompt, "Name a repository to `gh` as `-R owner/repo`, never by URL, which goes past the proxy.")
+	assert.Contains(t, sandboxPrompt, "Logs, artifacts, archives and release assets ask first, then need the network; "+
+		"`gh release download` and `gh run download` do not work.")
+	shared := strings.Index(sandboxPrompt, "Where the context's `cloud` names a cloud platform")
+	assert.Less(t, shared, strings.Index(sandboxPrompt, "Where `cloud` names `github`"))
 }

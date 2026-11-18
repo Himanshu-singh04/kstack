@@ -254,16 +254,6 @@ Pending work across the three parts of the app. Grouped by area; detailed items 
   - **The proxy.** Reads skip the asker and writes wait one at a time behind the write lock; asked
     reads need their own answer to both.
 
-- **Draw every approval from an action once a second target asks.** A call's request draws from
-  its `ToolAction`, one of `command`, `read`, `write` and the rest, while a cluster write is a
-  `ClusterWrite` of its own with its own branch in the request. When a second target asks too (a
-  host the egress proxy holds, a folder), make each target's request an action in that family
-  (`ClusterAction`, `HostAction`), carrying what `tools.ActionRequest` carries for the
-  cluster, so one request draws whatever is asked. The table stays as it is: `approvals.kind` says what the
-  row holds, `call` or `action`, and the read maps a target's row to its action as the box maps a
-  call's arguments to its own. In the same change, fold `toolCallEntry`'s `ClusterWrites` into one
-  list with `Approval`, so a new target adds no field.
-
 - **Give the Bash tool a fallback toolbox.** A command runs the user's own tools, off the
   snapshot's `PATH`, and a machine without `kubectl` leaves the agent unable to read a cluster. Ship
   a small read-only set the agent's own work needs — `kubectl`, perhaps `helm` and `jq` — at pinned
@@ -1032,6 +1022,91 @@ risk stays distinguishable from an unnoticed one, and is not repeated here.
   ([record](security/2026-09-28-bash-runs-in-a-sandbox.md)). **Shape:** a command outside the
   sandbox starts somewhere no unasked write reaches unless the user names the workspace, or the
   request says when the directory holds config a tool would run.
+
+- **A narrower AWS identity.** A sandboxed command reaches AWS as the sidecar's default chain,
+  with every permission the login has. Wanted: a read-only role per profile that the proxy
+  assumes, and the profile the chat's kubeconfig names in its `exec` block.
+
+- **More AWS services, a row at a time.** `run/awsproxy/services.go` lists thirteen. Each new
+  row names its class 6 reads: `secretsmanager` `GetSecretValue` and `BatchGetSecretValue`;
+  `ssm` `GetParameter`, `GetParameters`, `GetParametersByPath` and `GetParameterHistory` with
+  `WithDecryption`; `lambda` `GetFunctionConfiguration` and `ListFunctions` (the environment),
+  and `GetFunction`, or a refusal, since it answers a presigned URL to the code; `ecs`
+  `DescribeTaskDefinition` (the container environment).
+
+- **Skip the EC2 metadata probe when no AWS profile names a credential.** With no AWS
+  configuration, the default chain falls through to the EC2 metadata endpoint, which takes
+  seconds to fail off EC2, on each sandboxed AWS request. Disabling it outright would break a
+  Kstack on an EC2 machine with an instance role, as the EKS plugin's chain uses one.
+
+- **S3 uploads and buckets the user names.** No file is uploaded to S3 from the sandbox, and a
+  login without `s3:ListAllMyBuckets` is asked for every bucket read. Wanted: uploads to a
+  bucket the user names in Settings, and buckets named there as the login's own.
+
+- **Let a sandboxed `gh` follow GitHub's download links.** Workflow logs, artifacts, archives and
+  release assets answer with a signed link to another host, which a run with network off cannot
+  reach, and `gh release download` and `gh run download` dial `api.github.com` themselves
+  ([ADR](adr/2026-11-17-a-sandboxed-command-reaches-github-over-plain-http-at-ghs-own-host-name.md)).
+  Following a short list of GitHub's download hosts from the sidecar would make them work, and
+  make the proxy a path to those hosts.
+
+- **Git LFS through GitHub's proxy.** Its batch request is a `POST` that only reads, and its
+  objects live on another host; the proxy refuses it.
+
+- **Serve a user with no `gh` through `git credential fill`.** GitHub's token comes from
+  `gh auth token` alone; the alternative runs the user's credential helper outside the sandbox.
+
+- **Find `gh` where the user's shell finds it, on Linux.** `githubauth` looks `gh` up on the
+  sidecar's own `PATH`, which on Linux is not the login shell's: a desktop launch misses a `gh` in
+  `~/.local/bin` or linuxbrew, and the log says `gh not found`. Deciding which `PATH` to trust for a
+  program run outside the sandbox is the work.
+
+- **Rules, modes and durations for a cloud platform's actions.** Every change a sandboxed command
+  sends to a cloud platform asks, Once or Deny: no rule, mode or duration reaches one
+  ([ADR](adr/2026-11-17-a-sandboxed-command-reaches-a-cloud-platform-through-a-proxy-on-its-runs-one-relay.md)).
+  Wanted once a cloud platform's users approve the same change often: a cloud platform's own rules,
+  and a read-only mode among them.
+
+- **Draw each cloud platform's switch in Settings.** `sandboxCloudAccess` and
+  `sandboxCloudAccessSet` are served, and nothing draws them: the switches wait for the new settings
+  panel ([ADR](adr/2026-11-17-a-sandboxed-command-reaches-a-cloud-platform-through-a-proxy-on-its-runs-one-relay.md)).
+  Each turns on behind a confirm, as the chat's network switch does. For the named cloud platform
+  it says: sandboxed commands read your account without asking; what they read is sent to the
+  model's provider; with network on a command can send it anywhere; a change asks first; nothing
+  that answers a credential works. Then one line of the cloud platform's own, held by the webview
+  beside its name. AWS's line: *An object's contents ask first.* GitHub's line: *Private repositories are read without asking.* Google's
+  line: *Log entries are read without asking; an object's contents ask first.* Azure's line:
+  *Stored data is not reached; an app's settings and a deployment's parameters ask first.*
+
+- **A narrower Google identity.** A sandboxed `gcloud` acts as the user's active account. Issue
+  [#933](https://github.com/kstackhq/kstack/issues/933) asks to consider impersonating a service
+  account instead, which needs a setting, a UI and the user's own IAM binding.
+
+- **Google services off the table.** Secret Manager, Cloud Functions, Cloud Run, Deployment
+  Manager, regional and mTLS endpoints, Cloud Storage's XML API, batch requests and `logging`'s
+  gRPC tail reach nothing, nor do `gsutil`, `bq` and client libraries. Each needs its own reading
+  of which answers hold a secret.
+
+- **Google uploads that are not text.** A binary upload, or one past 1 MiB, is refused, so
+  `gcloud storage cp` of a binary file does not work in the sandbox. A media upload names its
+  bucket and object in the query, so it could be `Unshown` with a sentence naming them; a
+  multipart one could not.
+
+- **Azure's data plane.** A sandboxed `az` reaches Resource Manager alone: `az storage blob`,
+  `az keyvault secret` and `az acr login` fail with the proxy's message
+  ([ADR](adr/2026-11-17-a-sandboxed-command-reaches-azure-through-a-token-injecting-proxy.md)).
+
+- **Microsoft Graph for a sandboxed `az`.** `az ad` fails, and `az role assignment list` prints
+  ids without names.
+
+- **An Azure cloud the user registered.** A run serves the three public clouds alone; a user on
+  Azure Stack gets no account in the run.
+
+- **A cloud platform switch per chat.** `sandbox.<platform>` is global: a cloud platform on is on
+  for every chat. Network is the chat's; a chat about one cluster has no need of another cloud.
+
+- **Build the cluster grant on `runproxy.Grant`.** `kubeproxy.Grant` keeps its own token, life,
+  limits and write queue beside `runproxy`'s, so the two copies can drift.
 
 - **A setting that turns a cloud model platform on.** Bedrock, Vertex AI and Foundry are pending
   the LLM rebuild, and when they return, no platform is on until a setting turns it on: a cluster

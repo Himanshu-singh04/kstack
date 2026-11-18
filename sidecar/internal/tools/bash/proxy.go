@@ -16,29 +16,35 @@ package bash
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/kstackhq/kstack/sidecar/internal/run/kubeproxy"
 	"github.com/kstackhq/kstack/sidecar/internal/run/permissions"
+	"github.com/kstackhq/kstack/sidecar/internal/run/runproxy"
 	"github.com/kstackhq/kstack/sidecar/internal/run/session"
 	"github.com/kstackhq/kstack/sidecar/internal/tools"
 )
 
 // A run's grant takes 20 requests a second past a burst of 50, and holds at
-// most 32 open at once.
+// most 32 open at once; a cloud platform's also holds at most 16 request
+// bodies.
 const (
 	proxyQPS         = 20
 	proxyBurst       = 50
 	proxyMaxInFlight = 32
+	proxyBodies      = 16
 )
 
-// runProxy is a sandboxed run's way to its chat's cluster: a grant over the
-// run's claim, and the server on the run's socket.
+// runProxy is a sandboxed run's door: one listener and one server on the
+// run's socket, in front of the cluster's grant and each cloud platform's.
 type runProxy struct {
-	grant *kubeproxy.Grant
-	ln    net.Listener
-	srv   *http.Server
+	grant  *kubeproxy.Grant // the cluster's; nil for a run with no cluster
+	mounts []CloudMount     // each cloud platform's, in the order mounted
+	ln     net.Listener
+	srv    *runproxy.Server
 }
 
 // What a run's grant answers a write with when nobody can be asked: a
@@ -96,28 +102,169 @@ func writeOf(w kubeproxy.Write) tools.ClusterWrite {
 	}
 }
 
-// startProxy serves a grant over up for the run of sess in kubeContext on
-// socket, whose writes go to asker or are refused with refusal.
-func startProxy(up kubeproxy.Upstream, sess session.Session, kubeContext, socket string, asker kubeproxy.Asker, refusal string) (*runProxy, error) {
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		return nil, err
-	}
-	grant := kubeproxy.NewGrant(up, sess, kubeContext, asker, refusal, proxyQPS, proxyBurst, proxyMaxInFlight)
-	p := &runProxy{grant: grant, ln: ln, srv: kubeproxy.NewServer(grant)}
-	go func() { _ = p.srv.Serve(ln) }()
-	return p, nil
+// newClusterGrant is a grant over up for the run of sess in kubeContext,
+// whose writes go to asker or are refused with refusal.
+func newClusterGrant(up kubeproxy.Upstream, sess session.Session, kubeContext string, asker kubeproxy.Asker, refusal string) *kubeproxy.Grant {
+	return kubeproxy.NewGrant(up, sess, kubeContext, asker, refusal, proxyQPS, proxyBurst, proxyMaxInFlight)
 }
 
-// end ends the grant, which cancels every request in flight, closes the server
-// and its socket, then waits for every request's handler to return. A handler
-// reading a body returns only once its connection closes, so the close comes
-// first; the wait means no write is put to the user once the run is over.
+// certify makes the run's certificate and writes its bundle to caFile when a
+// mount returned a TLS route, and answers nil for a run with none.
+func (p *runProxy) certify(caFile string) (*runproxy.Certificate, error) {
+	if !p.hasTLSRoute() {
+		return nil, nil
+	}
+	cert, err := runproxy.NewCertificate(time.Now())
+	if err != nil { // coverage:ignore NewCertificate fails only when crypto/rand does
+		return nil, err
+	}
+	if err := cert.WriteBundle(caFile, runproxy.SystemBundles); err != nil {
+		return nil, err
+	}
+	return cert, nil
+}
+
+func (p *runProxy) hasTLSRoute() bool {
+	for _, m := range p.mounts {
+		for _, r := range m.Routes {
+			if r.TLS {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// serve listens on socket and serves the door over the grants p holds, each
+// cloud platform's route reading on, and TLS with cert.
+func (p *runProxy) serve(socket string, on func(permissions.Target) bool, cert *runproxy.Certificate) error {
+	var cluster http.Handler
+	if p.grant != nil {
+		cluster = p.grant
+	}
+	d, err := newDoor(cluster, p.mounts, on)
+	if err != nil {
+		return err
+	}
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		return err
+	}
+	p.ln, p.srv = ln, runproxy.NewServer(d, cert)
+	go func() { _ = p.srv.Serve(ln) }()
+	return nil
+}
+
+// grant is what a run's door ends and joins: the cluster's grant or a
+// cloud platform's.
+type grant interface {
+	End()
+	Wait()
+}
+
+// grants is every grant p holds, the cluster's first.
+func (p *runProxy) grants() []grant {
+	var gs []grant
+	if p.grant != nil {
+		gs = append(gs, p.grant)
+	}
+	for _, m := range p.mounts {
+		gs = append(gs, m.Grant)
+	}
+	return gs
+}
+
+// end ends every grant, which cancels every request in flight, closes the
+// server and its socket, then waits for every request's handler to return. A
+// handler reading a body returns only once its connection closes, so the close
+// comes first; the wait means no request is put to the user once the run is
+// over.
 func (p *runProxy) end() {
-	p.grant.End()
-	_ = p.srv.Close()
-	// Serve may not have taken the listener yet, and Close closes only one it
-	// has.
-	_ = p.ln.Close()
-	p.grant.Wait()
+	gs := p.grants()
+	for _, g := range gs {
+		g.End()
+	}
+	if p.srv != nil {
+		_ = p.srv.Close()
+		// Serve may not have taken the listener yet, and Close closes only one
+		// it has.
+		_ = p.ln.Close()
+	}
+	for _, g := range gs {
+		g.Wait()
+	}
+}
+
+// refusedUpgrade is the door's answer to a cloud platform's request that asks for a
+// stream past HTTP.
+const refusedUpgrade = "kstack: the sandbox does not upgrade a connection to a cloud platform"
+
+// door routes each request of a run by its transport and Host to that
+// route's handler, and answers anything else as the cluster's grant answers a
+// request it does not hold: an unknown host, a CONNECT, a cloud platform whose
+// switch is off. It reads nothing else of the request and authenticates
+// nothing: each grant checks its own token, so no route is trusted because of
+// its Host.
+type door struct {
+	routes map[routeKey]doorRoute
+	on     func(permissions.Target) bool // a cloud platform's switch, now
+}
+
+// routeKey is what names a route: one Host is two routes, one per transport.
+type routeKey struct {
+	tls  bool
+	host string
+}
+
+// doorRoute is one route's handler, and whose it is.
+type doorRoute struct {
+	handler http.Handler
+	target  permissions.Target
+}
+
+// newDoor is the door over cluster, nil for a run with none, and mounts, each
+// cloud platform's route reading on. No two routes share a transport and Host, and
+// none takes the cluster's.
+func newDoor(cluster http.Handler, mounts []CloudMount, on func(permissions.Target) bool) (*door, error) {
+	d := &door{routes: map[routeKey]doorRoute{}, on: on}
+	if cluster != nil {
+		d.routes[routeKey{host: kubeproxy.Host}] = doorRoute{handler: cluster, target: permissions.Cluster}
+	}
+	for _, m := range mounts {
+		for _, r := range m.Routes {
+			key := routeKey{tls: r.TLS, host: r.Host}
+			if _, taken := d.routes[key]; taken || r.Host == kubeproxy.Host {
+				return nil, errors.New("two routes on the run's door name the host " + r.Host + transportOf(r.TLS))
+			}
+			d.routes[key] = doorRoute{handler: r.Handler, target: m.Grant.Target()}
+		}
+	}
+	return d, nil
+}
+
+// transportOf is a route's transport, as an error names it.
+func transportOf(tls bool) string {
+	if tls {
+		return " over TLS"
+	}
+	return " over plain HTTP"
+}
+
+// ServeHTTP hands r to its route. A cloud platform's route reads its switch on
+// every request, so one turned off while the run lives answers the door's 401
+// to the next; a request already past the door ends as it would have.
+func (d *door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	route, ok := d.routes[routeKey{tls: runproxy.IsTLS(r), host: r.Host}]
+	if !ok || r.Method == http.MethodConnect || route.target != permissions.Cluster && !d.on(route.target) {
+		kubeproxy.Unauthorized(w)
+		return
+	}
+	// No cloud platform's proxy forwards a stream past HTTP, so none is asked to
+	// remember refusing one. The cluster's grant refuses its own, in the
+	// API server's shape kubectl prints.
+	if route.target != permissions.Cluster && runproxy.Upgrades(r.Header) {
+		http.Error(w, refusedUpgrade, http.StatusForbidden)
+		return
+	}
+	route.handler.ServeHTTP(w, r)
 }

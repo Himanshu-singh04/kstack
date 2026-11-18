@@ -258,3 +258,8 @@ usually just documentation in the wrong place.
 | 2026-11-12 | [The dashboard's namespace scope is a search param](2026-11-12-the-namespace-scope-is-a-search-param.md) | frontend | Accepted |
 | 2026-11-15 | [designsync reads Figma over the REST API](2026-11-15-designsync-reads-figma-over-the-rest-api.md) | repo | Accepted |
 | 2026-11-15 | [Agent guides sit beside the components they describe](2026-11-15-agent-guides-sit-beside-the-components-they-describe.md) | repo | Accepted |
+| 2026-11-17 | [A sandboxed command reaches a cloud platform through a proxy on its run's one relay](2026-11-17-a-sandboxed-command-reaches-a-cloud-platform-through-a-proxy-on-its-runs-one-relay.md) | sidecar | Accepted |
+| 2026-11-17 | [A sandboxed command reaches AWS through a re-signing proxy](2026-11-17-a-sandboxed-command-reaches-aws-through-a-re-signing-proxy.md) | sidecar | Accepted |
+| 2026-11-17 | [A sandboxed command reaches Azure through a token-injecting proxy](2026-11-17-a-sandboxed-command-reaches-azure-through-a-token-injecting-proxy.md) | sidecar | Accepted |
+| 2026-11-17 | [A sandboxed command reaches GitHub over plain HTTP at gh's own host name](2026-11-17-a-sandboxed-command-reaches-github-over-plain-http-at-ghs-own-host-name.md) | sidecar | Accepted |
+| 2026-11-17 | [Google Cloud is reached with the active gcloud account's token](2026-11-17-google-cloud-is-reached-with-the-active-gcloud-accounts-token.md) | sidecar | Accepted |

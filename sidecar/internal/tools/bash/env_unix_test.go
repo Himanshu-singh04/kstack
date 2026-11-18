@@ -38,7 +38,7 @@ func TestTheSandboxedEnvironmentIsFixed(t *testing.T) {
 	}
 	toolchain := []string{"NVM_DIR=/home/ana/.nvm", "ASDF_NODEJS_VERSION=20.1.0"}
 
-	got := sandboxedRunEnv(environ, kstackVars, "/opt/bin:/usr/bin", "/data/ws", "/data/ws/sub", rd, cluster, "/data/th", toolchain)
+	got := sandboxedRunEnv(environ, kstackVars, "/opt/bin:/usr/bin", "/data/ws", "/data/ws/sub", rd, cluster, "/data/th", toolchain, nil)
 
 	assert.Equal(t, []string{
 		"PATH=/opt/bin:/usr/bin",
@@ -62,6 +62,7 @@ func TestTheSandboxedEnvironmentIsFixed(t *testing.T) {
 		"GOCACHE=/data/th/go/build",
 		"GOMODCACHE=/data/th/go/mod",
 		"CARGO_HOME=/data/th/cargo",
+		"CLOUDSDK_CONFIG=/data/th/gcloud",
 		"NVM_DIR=/home/ana/.nvm",
 		"ASDF_NODEJS_VERSION=20.1.0",
 		"KSTACK=1",

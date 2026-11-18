@@ -15,6 +15,7 @@ import (
 	"github.com/kstackhq/kstack/sidecar/internal/lib/lifecycle"
 	"github.com/kstackhq/kstack/sidecar/internal/lib/sqlitemigrate"
 	"github.com/kstackhq/kstack/sidecar/internal/llm"
+	"github.com/kstackhq/kstack/sidecar/internal/run/permissions"
 	"github.com/kstackhq/kstack/sidecar/internal/run/sandbox"
 	"github.com/kstackhq/kstack/sidecar/internal/run/session"
 	"github.com/kstackhq/kstack/sidecar/internal/services/auth"
@@ -47,10 +48,12 @@ type Runtime struct {
 	// Shell is nil on a machine with no shell.
 	Shell         *bash.Tool
 	SandboxStatus sandbox.Status
-	Settings      *settings.Service
-	Memory        memory.Service
-	Tools         tools.Box
-	Chat          chat.Service
+	// CloudTargets are the cloud platforms this build has, in Settings' order.
+	CloudTargets []permissions.Target
+	Settings     *settings.Service
+	Memory       memory.Service
+	Tools        tools.Box
+	Chat         chat.Service
 
 	// parts is added to as each service is built, so start order is build order;
 	// stop and close run in reverse, which is what keeps poke's hub open until its
@@ -168,12 +171,14 @@ func build(ctx context.Context, cfg Config) (*Runtime, error) {
 	rt.LLM = llm.New(rt.Catalog.Providers()...)
 
 	pathList := func() settings.RunPath { return settingsStore.Get().RunPath() }
-	shell, found := bash.New(p.Bash, cfg.HostPID, sb, rt.Cluster, pathList)
+	platforms := cloudPlatformsFor(probed, cfg.cloudPlatforms)
+	shell, found := bash.New(p.Bash, cfg.HostPID, sb, rt.Cluster, pathList, bash.Cloud{Platforms: platforms, On: settingsStore.CloudOn})
 	if found && cfg.callDeadline != nil {
 		shell.SetCallDeadline(cfg.callDeadline)
 	}
 	rt.Shell = shell
 	rt.SandboxStatus = sandboxStatusOf(found, probed)
+	rt.CloudTargets = cloudTargets(platforms)
 	rt.Settings = newSettingsService(settingsStore, boxer, shell, rt.SandboxStatus, p.Bash.DeniedDirs, login.fault, p.Bash.TmpDir)
 
 	rt.Memory, err = memory.New(db, serverUIDLookup{clusters: rt.Cluster.Clusters()})
@@ -191,7 +196,7 @@ func build(ctx context.Context, cfg Config) (*Runtime, error) {
 		return fail(fmt.Errorf("fence Kstack's directories: %w", err))
 	}
 
-	rt.Chat, err = chat.New(db, p.ChatsDir, p.MonitorDir, rt.LLM, clustercard.New(rt.Cluster), rt.Memory, rt.Tools, rt.Catalog, rt.SandboxStatus, rt.Settings)
+	rt.Chat, err = chat.New(db, p.ChatsDir, p.MonitorDir, rt.LLM, clustercard.New(rt.Cluster), rt.Memory, rt.Tools, rt.Catalog, rt.SandboxStatus, rt.Settings, rt.CloudTargets)
 	if err != nil {
 		return fail(err)
 	}
@@ -252,5 +257,28 @@ func (rt *Runtime) resolver() *graph.Resolver {
 		Settings:      rt.Settings,
 		Executables:   prober,
 		Logs:          rt.Logs,
+		CloudTargets:  rt.CloudTargets,
 	}
+}
+
+// cloudPlatformsFor is the cloud platforms a sandboxed run may reach: the
+// build's, or a test's in their place. A machine with no sandbox has none, so
+// it offers no switch.
+func cloudPlatformsFor(status sandbox.Status, configured []bash.CloudPlatform) []bash.CloudPlatform {
+	switch {
+	case !status.Available:
+		return nil
+	case configured != nil:
+		return configured
+	}
+	return builtCloudPlatforms()
+}
+
+// cloudTargets is each cloud platform's target, in the build's order.
+func cloudTargets(platforms []bash.CloudPlatform) []permissions.Target {
+	targets := make([]permissions.Target, 0, len(platforms))
+	for _, p := range platforms {
+		targets = append(targets, p.Target())
+	}
+	return targets
 }

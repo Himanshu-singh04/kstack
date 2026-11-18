@@ -348,7 +348,7 @@ func TestNewSweepsADeadSidecarsRunDirectories(t *testing.T) {
 		require.NoError(t, os.Mkdir(filepath.Join(dir, name), 0o700))
 	}
 
-	if _, ok := New(Paths{ShellDir: t.TempDir(), RunsDir: runs, TmpDir: tmpDir}, 0, nil, nil, nil); !ok {
+	if _, ok := New(Paths{ShellDir: t.TempDir(), RunsDir: runs, TmpDir: tmpDir}, 0, nil, nil, nil, Cloud{}); !ok {
 		t.Skip("no bash found on this machine")
 	}
 
@@ -452,4 +452,14 @@ func TestTheLoginShellsTempDirIsARuns(t *testing.T) {
 	assert.DirExists(t, dir, "the lock keeps a sweep off it")
 	cleanup()
 	assert.NoDirExists(t, dir)
+}
+
+// A run's file is owner-only from birth.
+func TestANewFileIsOwnerOnly(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, writeNew(path, []byte("x")))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }

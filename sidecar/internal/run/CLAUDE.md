@@ -1,9 +1,12 @@
 # internal/run — what confines one run
 
-Five leaves that know no tool and no record: `loginshell` (the user's shell, read once per launch),
-`session` (one run's policy), `sandbox` (the machine's sandbox), `permissions` (the decision over a
-cluster action) and `kubeproxy` (the proxy a sandboxed command reaches its cluster through). A tool
-imports these; none imports a tool. Posture and the tests that pin it:
+Ten leaves that know no tool and no record: `loginshell` (the user's shell, read once a launch),
+`session` (one run's policy), `sandbox` (the machine's sandbox), `permissions` (the decision over an
+action), `kubeproxy` (the proxy a sandboxed command reaches its cluster through),
+`runproxy` (what every cloud platform's proxy shares, and the run's server), `awsproxy` (AWS's),
+`azureproxy` (Azure's), `githubproxy` (GitHub's) and `gcpproxy` (Google Cloud's). A tool imports
+these; none imports a tool.
+Posture and the tests that pin it:
 [`docs/security-model.md`](../../../docs/security-model.md).
 
 ## The login shell (`loginshell`)
@@ -73,7 +76,9 @@ deepest existing folder. Both platforms compile one merged list (`Policy.rules`)
 winning, the run's own paths last.
 
 **`neverEnv` (`env.go`) is the one list of variables that may never pass** (agent sockets,
-`DOCKER_HOST`, tokens, loader variables, shell startup hooks, every `AWS_`) →
+`DOCKER_HOST`, tokens, loader variables, shell startup hooks, every `AWS_`, `ARM_` and `AZURE_`
+but `AZURE_CONFIG_DIR`). **`Run.check` passes one only as a placeholder** (`placeholders.go`): an
+exact name holding the value AWS's mount writes, so a real key fails the run →
 [the sandbox's own environment](../../../docs/security/2026-10-02-the-sandboxs-own-environment.md).
 
 **The zones are Kstack's lists** (`lists.go`, `lists_linux.go`, `lists_darwin.go`): `System`,
@@ -162,6 +167,8 @@ a chat through the real sandbox.
   class 6 asks under `ReadOnly` and `Ask` and is `Permit` under `Auto`. A grant's `Duration` is
   `once`, `command`, `chat` or `always`. **The verdict is order-independent**; rule order picks the reason
   alone. `Unmatched` and `Forbid` prompt; a prompt is a denial the user may lift.
+- **A cloud platform's action** (`Action.Target` not `Cluster`) carries `Class` and `Summary` alone,
+  is `Forbid` before any rule or mode, and no rule matches it; the two flags still apply.
 - `Match` is the one glob matcher. **Every pattern Kstack writes from a value goes through
   `Literal`.** `ClusterScope` (`[cluster]`) matches cluster-scoped actions alone.
 - `Rule.Line` is the rule in the user's words, shown in Settings, reasons and requests; keep its
@@ -184,7 +191,7 @@ that namespace's scope. →
 **`internal/run/kubeproxy` is the cluster proxy**; it imports nothing of `tools` or
 `services/cluster`. Files: `kubeproxy.go` (grant, handler), `policy.go` (path parse, read
 policy), `write.go` (write path), `classify.go`, `diff.go` (preview), `secretread.go`, `redact.go`
-and `redact_helm.go` (Secret rewriter), `status.go` (every refusal's `Status`), `server.go`.
+and `redact_helm.go` (Secret rewriter), `status.go` (every refusal's `Status`, and `Unauthorized`).
 → [ADR: the proxy reads a request as the API server will](../../../docs/adr/2026-10-17-the-cluster-proxy-reads-a-request-as-the-api-server-does.md).
 
 - **A `Grant`** (`NewGrant`) holds the run's session, the kube-context its writes are decided in, a
@@ -242,4 +249,96 @@ and `redact_helm.go` (Secret rewriter), `status.go` (every refusal's `Status`), 
   **A helm release is redacted inside** (`redact_helm.go`). **A failure fails closed**: a 502
   before the first piece, a cut body after (a watch sends its status line at once).
   → [ADR: helm release Secrets pass redacted inside](../../../docs/adr/2026-09-28-helm-release-secrets-pass-redacted-inside.md).
-- **The server** sets no read or write timeout, which would cut a watch.
+
+## The cloud platform grant (`runproxy`)
+
+**`internal/run/runproxy` is what each cloud platform's proxy (`run/<platform>proxy`) builds on**;
+it imports `permissions` and `session` alone. `NewServer` is the run's server: HTTP/1.1, no read or
+write timeout, which would cut a watch. With a `Certificate` (`cert.go`: ECDSA, `127.0.0.1` alone,
+key in memory) it serves TLS on the same listener: `listen.go` reads a connection's first byte
+under the header bound; `IsTLS` tells a handler.
+
+- **A `Grant`** is one run's access to one cloud platform: a 256-bit token, its `Limits`, and an
+  `Asker` or a refusal. `NewGrant` panics on `Cluster` or a zero limit. `End` makes `Holds` and
+  `Enter` false and cancels what `Enter` let in; `Wait` joins it. `Challenge` answers 407 when
+  `Limits.Challenges`, else 401.
+- `Body` reads a body in one of `Limits.Bodies` slots (403 encoded, 429 none free, 413 past 1 MiB);
+  `BodySlot` takes one for a body the cloud platform reads itself; each cuts a read short at `End`, as
+  `CutReadsOnEnd` does for a body streamed unread;
+  `Slot` takes a slot, then the limiter; `BodyRefusal` and `SlotRefusal` word their statuses; `IsForm` reads a form's type;
+  `Upgrades` reads an `Upgrade` header, even an empty one, and the `Connection` list, for the
+  run's door and `kubeproxy` alike; `Outbound` never copies `Authorization` or
+  `Proxy-Authorization`.
+- **`Decide` is the one ask path**: it keeps `Class` and `Summary` alone, stamps the target,
+  refuses with no asker and a request that cannot be shown (not UTF-8 with no `Unshown`, a query
+  or form body that does not parse), then takes its lock (`maxQueued` waiting). A refusal is
+  recorded; the rest ask; only an approval takes a slot and forwards. A data read gives up the
+  lock before `forward`, a change at its return.
+
+## Azure's proxy (`azureproxy`)
+
+**`internal/run/azureproxy` is Azure Resource Manager's proxy** over a `runproxy.Grant` and the
+`Account` its run mounted with. The token is a bearer, or `X-IDENTITY-HEADER` at `IdentityPath`,
+the managed-identity endpoint, which answers the grant's token. `path.go` reads Resource
+Manager's grammar, its words ASCII, any case, and two polling paths (`GET`).
+`classify.go` refuses AKS run-command, access profiles, a credential action (by name, or listed:
+`publishxml`, `readonlykeys`, any method) and an unnamed `list`/`get`; then class 6 (the
+secret-metadata list, and an operation's result in its namespaces), reads, class 5, class 4.
+A change naming no subscription is refused; any other goes to `Decide`. Forwarding adds
+the user's token for the subscription's tenant; a `401` drops it and answers the
+sign-in sentence. `rewrite.go` points `Location`, `Azure-AsyncOperation`, `Operation-Location`
+and the top-level `nextLink` at the door. A `429`, which `az` retries, is answered `403`. →
+[ADR](../../../docs/adr/2026-11-17-a-sandboxed-command-reaches-azure-through-a-token-injecting-proxy.md),
+[record](../../../docs/security/2026-11-17-azure-through-the-proxy.md).
+
+## The AWS proxy (`awsproxy`)
+
+**`internal/run/awsproxy` re-signs** →
+[ADR](../../../docs/adr/2026-11-17-a-sandboxed-command-reaches-aws-through-a-re-signing-proxy.md).
+The run's key id is `KSTACK` and its grant's token. The handler reads service and region from the
+SigV4 scope (`scope.go`), refuses a service off `services.go`'s table, drops the sandbox's
+signature, and signs the request it builds for the table's host with the user's credentials
+(`Identity`, `forward.go`). The classifier (`classify.go`) reads the operation only where the
+row's protocol names it, refusing a request that names it elsewhere or twice, then checks refused,
+class 6, class 5, then a read, and asks for the rest; a read naming another account's bucket,
+registry or template URL asks, against the login's own buckets (`Buckets`, one list shared by its
+runs, trusted only while fresh). An `x-amz` header
+off `headers.go`'s list, a forwarded header sent twice, a streamed or multipart upload, and a body
+that is not text are refused,
+in the shape its service's clients read an error (`refuse.go`). An error answer is read whole and
+checked for the user's key; a dead credential's code calls `Drop` before that check,
+and forgets the bucket list, since the next login may be another account's (`readError`, which the
+bucket list reads its errors through too). Adding a row or a header is a
+security change.
+
+## GitHub's proxy (`githubproxy`)
+
+**`internal/run/githubproxy` is GitHub's proxy over a `runproxy.Grant`**; the token comes through
+its `TokenSource`. → [ADR](../../../docs/adr/2026-11-17-a-sandboxed-command-reaches-github-over-plain-http-at-ghs-own-host-name.md).
+
+- **The hosts are `gh`'s**: `GitHost` (`github.localhost`, Git's smart HTTP to `github.com`) and
+  `APIHost` (`api.github.localhost`, REST and GraphQL). The grant's token is the `Basic` proxy
+  password, and the grant challenges with `407`, since `git` sends it only once asked.
+- **The headers forwarded are lists by exact name** (`apiHeaders`, `gitHeaders`); `Git-Protocol`
+  rides a fetch alone and `GraphQL-Features` `/graphql` alone. A refusal starts `kstack:`, a 403,
+  in GitHub's JSON on the API host and text on the Git host.
+- **The classifier** (`classify.go`, `graphql.go`): a read passes; a change, a push and
+  `dataPaths` ask; `credentialPaths` is refused. A path matches in any case, and one by id
+  (`/repositories/{id}`, `/organizations/{id}`) as its form by name. GraphQL is a JSON `POST` with
+  no query string, and any mutation makes its document a change.
+- **The push reader** (`push.go`) reads at most 64 KiB of pkt-lines (shallow lines, commands,
+  options) in a body slot, refuses what it cannot read, then streams the pack unread. An answer
+  GitHub breaks off is broken off to the client.
+- **No redirect is followed.** A link to the upstream's own origin, in `Location` or `Link`, is
+  handed back as the route's; one to another host passes on an approved data read alone.
+
+## Google Cloud's proxy (`gcpproxy`)
+
+**`internal/run/gcpproxy` is the proxy a sandboxed `gcloud` reaches Google through**, over a
+`runproxy.Grant`. It reaches the user's token through `TokenSource`, never `services`.
+`services.go` is the table: six services, each one upstream host and its path prefixes, routed as
+`<service>.gcp.kstack.invalid`. `request.go` reads a path by decoded segment and refuses an encoded
+`/` or `.` outside a storage object's name. `classify.go` answers read, change, data read (class 6)
+or refused. `redact.go` blanks secrets in `compute`'s and `container`'s 2xx answers and fails
+closed. **Every refusal is Google's 403**, a grant's 429 included, since `gcloud` retries a 429 and
+a 5xx. → [ADR](../../../docs/adr/2026-11-17-google-cloud-is-reached-with-the-active-gcloud-accounts-token.md).

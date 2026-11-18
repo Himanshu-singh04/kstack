@@ -618,8 +618,30 @@ type ClusterWrite struct {
 	DryRun bool   `json:"dryRun"`
 }
 
+// CloudRequest is what a sandboxed command sent to a cloud platform, as the
+// user is shown it. The cloud platform is the action's Target.
+type CloudRequest struct {
+	Host        string `json:"host"` // the upstream host dialled
+	Method      string `json:"method"`
+	Path        string `json:"path"` // path and raw query, as forwarded
+	ContentType string `json:"contentType"`
+	Body        string `json:"body"` // as sent; empty with Unshown
+	// Unshown is the cloud platform's sentence for a body the request does not
+	// show.
+	Unshown string   `json:"unshown,omitempty"`
+	Details []Detail `json:"details,omitempty"`
+}
+
+// Detail is one line the cloud platform's classifier read from the request: a
+// label of the cloud platform's, and the command's text.
+type Detail struct {
+	Label string `json:"label"`
+	Value string `json:"value"`
+}
+
 // ActionRequest is one classified action held for the user, or decided with
-// nobody asked. It is what an action approval's request column holds.
+// nobody asked. It is what an action approval's request column holds. At most
+// one of Write and Cloud is set.
 type ActionRequest struct {
 	Action permissions.Action `json:"action"`
 	// Grantable is whether an answer may write a rule that allows it.
@@ -631,6 +653,9 @@ type ActionRequest struct {
 	ChatRule    string `json:"chatRule"`
 	// Write is the request as sent; nil for an action with none.
 	Write *ClusterWrite `json:"write,omitempty"`
+	// Cloud is a request to a cloud platform as sent; nil for a cluster
+	// request.
+	Cloud *CloudRequest `json:"cloud,omitempty"`
 	// Diff is the change as a unified diff of YAML; "" for none.
 	Diff string `json:"diff"`
 	// DiffCut is a diff that stops short of the whole change.

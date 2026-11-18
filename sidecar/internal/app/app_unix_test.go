@@ -18,18 +18,27 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"maps"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -38,8 +47,13 @@ import (
 	"github.com/kstackhq/kstack/sidecar/internal/lib/safe"
 	"github.com/kstackhq/kstack/sidecar/internal/lib/testutil"
 	"github.com/kstackhq/kstack/sidecar/internal/llm"
+	"github.com/kstackhq/kstack/sidecar/internal/run/azureproxy"
+	"github.com/kstackhq/kstack/sidecar/internal/run/githubproxy"
 	"github.com/kstackhq/kstack/sidecar/internal/run/loginshell"
+	"github.com/kstackhq/kstack/sidecar/internal/run/permissions"
+	"github.com/kstackhq/kstack/sidecar/internal/run/runproxy"
 	"github.com/kstackhq/kstack/sidecar/internal/run/sandbox"
+	"github.com/kstackhq/kstack/sidecar/internal/services/gcpauth"
 	"github.com/kstackhq/kstack/sidecar/internal/services/settings"
 	"github.com/kstackhq/kstack/sidecar/internal/tools"
 	"github.com/kstackhq/kstack/sidecar/internal/tools/bash"
@@ -68,7 +82,7 @@ func TestBashIsOfferedWithTheSandbox(t *testing.T) {
 	withBash := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(withBash, "bash"), []byte("#!/bin/sh\n"), 0o755))
 	t.Setenv("PATH", withBash)
-	shell, found := bash.New(bash.Paths{ShellDir: t.TempDir()}, 0, sb, nil, nil)
+	shell, found := bash.New(bash.Paths{ShellDir: t.TempDir()}, 0, sb, nil, nil, bash.Cloud{})
 	require.True(t, found)
 
 	var schema struct {
@@ -87,7 +101,7 @@ func TestBashIsOfferedWhenItIsFound(t *testing.T) {
 	withBash := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(withBash, "bash"), []byte("#!/bin/sh\n"), 0o755))
 	t.Setenv("PATH", withBash)
-	shell, found := bash.New(bash.Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil)
+	shell, found := bash.New(bash.Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, bash.Cloud{})
 	require.True(t, found)
 	box, err := chatTools(toolDeps{shell: shell, fenced: []string{t.TempDir()}, umask: 0o022})
 	require.NoError(t, err)
@@ -105,7 +119,7 @@ func TestEveryGatedToolCanBeShown(t *testing.T) {
 	withBash := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(withBash, "bash"), []byte("#!/bin/sh\n"), 0o755))
 	t.Setenv("PATH", withBash)
-	shell, found := bash.New(bash.Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil)
+	shell, found := bash.New(bash.Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, bash.Cloud{})
 	require.True(t, found)
 
 	box, err := chatTools(toolDeps{shell: shell, fenced: []string{t.TempDir()}, umask: 0o022})
@@ -449,4 +463,514 @@ func TestAQuitDuringTheProbeReleasesTheLock(t *testing.T) {
 	_, err := build(ctx, cfg)
 	require.ErrorIs(t, err, context.Canceled)
 	requireUnlocked(t, cfg.DataDir)
+}
+
+// fakeCloud is a cloud platform whose upstream is an httptest TLS server: a GET
+// is a read, forwarded unasked, and anything else a change put to the user. Its
+// client finds the route and its token in FAKE_CLOUD_URL and FAKE_CLOUD_TOKEN,
+// and carries the token in X-Fake-Token.
+type fakeCloud struct {
+	upstream *httptest.Server
+	seen     chan string // each request the upstream received, "<method> <path>"
+}
+
+func newFakeCloud(t *testing.T) *fakeCloud {
+	f := &fakeCloud{seen: make(chan string, 8)}
+	f.upstream = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.seen <- r.Method + " " + r.URL.Path
+		_, _ = io.WriteString(w, "upstream "+r.Method)
+	}))
+	t.Cleanup(f.upstream.Close)
+	return f
+}
+
+func (f *fakeCloud) Target() permissions.Target { return permissions.AWS }
+
+func (f *fakeCloud) Mount(_ context.Context, run bash.CloudRun) (bash.CloudMount, error) {
+	g := runproxy.NewGrant(permissions.AWS, run.Session, run.Asker, run.Refusal, runproxy.Limits{QPS: 100, Burst: 100, Open: 8, Bodies: 8})
+	client := f.upstream.Client()
+	host := "127.0.0.1:" + strconv.Itoa(run.Port)
+	forward := func(w http.ResponseWriter, r *http.Request) error {
+		out, err := http.NewRequestWithContext(r.Context(), r.Method, f.upstream.URL+r.URL.Path, r.Body)
+		if err != nil {
+			return err
+		}
+		out.Header = runproxy.Outbound(r.Header, []string{"Content-Type"})
+		resp, err := client.Do(out)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		_, err = io.Copy(w, resp.Body)
+		return err
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !g.Holds(r.Header.Get("X-Fake-Token")) {
+			g.Challenge(w)
+			return
+		}
+		r, done, ok := g.Enter(r)
+		if !ok {
+			g.Challenge(w)
+			return
+		}
+		defer done()
+		if r.Method == http.MethodGet {
+			release, status := g.Slot(r.Context())
+			if status != 0 {
+				http.Error(w, "kstack: no slot", status)
+				return
+			}
+			defer release()
+			_ = forward(w, r)
+			return
+		}
+		body, release, status := g.Body(w, r)
+		defer release()
+		if status != 0 {
+			http.Error(w, "kstack: unreadable body", status)
+			return
+		}
+		out := g.Decide(r.Context(), runproxy.Request{
+			Action: permissions.Action{Class: permissions.UpstreamWrite, Summary: "AWS: fake change"},
+			Sent: runproxy.Sent{
+				Host: f.upstream.Listener.Addr().String(), Method: r.Method, Path: r.URL.RequestURI(),
+				ContentType: r.Header.Get("Content-Type"), Body: body,
+			},
+		}, func() error { return forward(w, r) })
+		if !out.Forwarded {
+			http.Error(w, out.Message, out.Status)
+		}
+	})
+	return bash.CloudMount{
+		Routes: []bash.Route{{Host: host, Handler: handler}},
+		Env:    []string{"FAKE_CLOUD_URL=http://" + host, "FAKE_CLOUD_TOKEN=" + g.Token()},
+		Grant:  g,
+	}, nil
+}
+
+// With its switch turned on through the wire, a sandboxed curl reads the
+// cloud platform unasked, and its change waits on one request and reaches the
+// upstream once approved; with the switch off the route is the door's 401.
+func TestASandboxedCommandReachesACloudPlatformThroughTheDoor(t *testing.T) {
+	cloud := newFakeCloud(t)
+	e := startE2E(t, func(c *Config) { c.cloudPlatforms = []bash.CloudPlatform{cloud} })
+	raw := graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: AWS, on: true) { target on } }`)
+	require.Contains(t, raw, `{"target":"AWS","on":true}`, raw)
+
+	curl := `curl -sS -H "X-Fake-Token: $FAKE_CLOUD_TOKEN" `
+	chatID := e.ask(t, "reach the cloud platform", llm.StagedCall("Bash", bashInput(
+		curl+`"$FAKE_CLOUD_URL/read"; echo; `+curl+`-X POST -H 'Content-Type: text/plain' -d 'change=1' "$FAKE_CLOUD_URL/change"`)))
+
+	assert.Equal(t, "GET /read", testutil.Recv(t, cloud.seen, "the read"))
+	w := e.clusterWrite(t, "pending")
+	require.NotNil(t, w.request.Cloud)
+	assert.Equal(t, permissions.AWS, w.request.Action.Target)
+	assert.Equal(t, "POST", w.request.Cloud.Method)
+	assert.Equal(t, "change=1", w.request.Cloud.Body)
+	assert.Empty(t, cloud.seen, "nothing reaches the cloud platform before the user decides")
+	raw = graphql(t, e.url, `mutation { approvalDecide(id: "`+w.id+`", decision: Once) }`)
+	require.Contains(t, raw, `"approvalDecide":true`, raw)
+	assert.Equal(t, "POST /change", testutil.Recv(t, cloud.seen, "the change"))
+	row := e.bashCall(t, "succeeded", "failed")
+	assert.Contains(t, row.result, "upstream GET")
+	assert.Contains(t, row.result, "upstream POST")
+
+	raw = graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: AWS, on: false) { target on } }`)
+	require.Contains(t, raw, `{"target":"AWS","on":false}`, raw)
+	// A run started while it is off mounts nothing, so the route is the door's.
+	// The door's port is the run's own, read from its kubeconfig.
+	e.askAgain(t, chatID, false, "reach the cloud platform", llm.StagedCall("Bash", bashInput(
+		`door=$(grep -o '127\.0\.0\.1:[0-9]*' "$KUBECONFIG" | head -n 1); `+
+			`curl -s -o /dev/null -w '%{http_code}' -H "X-Fake-Token: none" "http://$door/read"; echo " $FAKE_CLOUD_URL"`)))
+	result := e.lastBashResult(t, "401")
+	assert.NotContains(t, result, "http://", "a run with the switch off holds no route")
+	assert.Empty(t, cloud.seen)
+}
+
+const (
+	azSub    = "00000000-0000-0000-0000-000000000001"
+	azTenant = "0000000a-0000-0000-0000-000000000000"
+	// azConverge bounds a command running az, whose first run in a fresh
+	// configuration directory takes seconds, more on a loaded runner.
+	azConverge = 2 * time.Minute
+)
+
+// fakeAzLogin is the user's az as Azure's mount reads it: signed into one
+// subscription, its token a known string.
+type fakeAzLogin struct{}
+
+func (fakeAzLogin) Account(context.Context) (azureproxy.Account, bool) {
+	return azureproxy.Account{
+		Cloud: azureproxy.Cloud{Name: "AzureCloud", Endpoints: map[string]string{
+			"resourceManager":           "https://management.azure.com/",
+			"activeDirectory":           "https://login.microsoftonline.com",
+			"activeDirectoryResourceId": "https://management.core.windows.net/",
+		}},
+		Subscriptions: []azureproxy.Subscription{{ID: azSub, Name: "Pay-As-You-Go", TenantID: azTenant, IsDefault: true}},
+	}, true
+}
+
+func (fakeAzLogin) Token(context.Context, string) (string, error) { return "users-own-arm-token", nil }
+func (fakeAzLogin) Drop(string, string)                           {}
+
+// fakeARM is Resource Manager over TLS: two pages of AKS clusters, one VM,
+// and a resource group delete Azure finishes after one poll. Its polls say
+// Retry-After 1: az reads 0 as unset and waits its default 30 s. seen is
+// each request's method and path.
+type fakeARM struct {
+	srv  *httptest.Server
+	mu   sync.Mutex
+	seen []string
+}
+
+func newFakeARM(t *testing.T) *fakeARM {
+	f := &fakeARM{}
+	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.seen = append(f.seen, r.Method+" "+r.URL.Path)
+		polls := 0
+		for _, s := range f.seen {
+			if strings.Contains(s, "/operationresults/") {
+				polls++
+			}
+		}
+		f.mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer users-own-arm-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		p := strings.ToLower(r.URL.Path)
+		switch {
+		case strings.HasSuffix(p, "/managedclusters") && r.URL.Query().Get("page") == "":
+			_, _ = io.WriteString(w, `{"value": [{"name": "aks-1", "location": "westus"}], "nextLink": "https://management.azure.com`+r.URL.Path+`?api-version=2024-05-01&page=2"}`)
+		case strings.HasSuffix(p, "/managedclusters"):
+			_, _ = io.WriteString(w, `{"value": [{"name": "aks-2", "location": "westus"}]}`)
+		case strings.HasSuffix(p, "/virtualmachines"):
+			_, _ = io.WriteString(w, `{"value": [{"name": "vm-1", "location": "westus"}]}`)
+		case r.Method == http.MethodDelete:
+			w.Header().Set("Location", "https://management.azure.com/subscriptions/"+azSub+"/operationresults/tok?api-version=2024-11-01")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+		case strings.Contains(p, "/operationresults/") && polls < 2:
+			w.Header().Set("Location", "https://management.azure.com"+r.URL.RequestURI())
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+		case strings.Contains(p, "/operationresults/"):
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error": {"code": "NotFound", "message": "none"}}`)
+		}
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeARM) requests() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.seen)
+}
+
+// startAzureE2E is startE2E with Azure's mount over the fake login and
+// arm, its switch turned on, and the az KSTACK_TEST_AZ names on the run's
+// PATH. It skips without one: a runner image's own az is any version, and
+// may be a launcher that finds its Python by a path relative to itself.
+func startAzureE2E(t *testing.T, arm *fakeARM) *e2e {
+	t.Helper()
+	az := os.Getenv("KSTACK_TEST_AZ")
+	if az == "" {
+		t.Skip("KSTACK_TEST_AZ names no az")
+	}
+	bin, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, os.Symlink(az, filepath.Join(bin, "az")))
+	e := startE2E(t, func(c *Config) {
+		c.cloudPlatforms = []bash.CloudPlatform{bash.NewAzure(fakeAzLogin{}, testutil.DialAnywhere(arm.srv))}
+		c.launchPath = append([]string{bin}, c.launchPath...)
+	})
+	raw := graphql(t, e.url, `mutation { sandboxPathInclude(dir: "`+bin+`", target: "`+bin+`") { dir } }`)
+	require.Contains(t, raw, `"dir":"`+bin+`"`, raw)
+	raw = graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: Azure, on: true) { target on } }`)
+	require.Contains(t, raw, `{"target":"Azure","on":true}`, raw)
+	return e
+}
+
+// az reads Resource Manager in the sandbox across a paged answer, unasked.
+func TestAzListsInTheSandbox(t *testing.T) {
+	arm := newFakeARM(t)
+	e := startAzureE2E(t, arm)
+	e.ask(t, "list azure", llm.StagedCall("Bash", bashInput(`az aks list --query '[].name' -o tsv && az vm list --query '[].name' -o tsv`)))
+
+	row := e.bashCallWithin(t, azConverge, "succeeded", "failed")
+	assert.Equal(t, "succeeded", row.status, row.result)
+	assert.Contains(t, row.result, "aks-1\naks-2\nvm-1")
+	assert.NotContains(t, row.result, "users-own-arm-token")
+}
+
+// A resource group delete waits on one request; denied, az fails and Azure
+// sees no DELETE.
+func TestAnAzChangeAsks(t *testing.T) {
+	arm := newFakeARM(t)
+	e := startAzureE2E(t, arm)
+	e.ask(t, "delete azure group", llm.StagedCall("Bash", bashInput(`az group delete -n rg --yes`)))
+
+	w := e.clusterWriteWithin(t, azConverge, "pending")
+	require.NotNil(t, w.request.Cloud)
+	assert.Equal(t, permissions.Azure, w.request.Action.Target)
+	assert.Equal(t, permissions.Destructive, w.request.Action.Class)
+	assert.Equal(t, "Azure: delete resource group rg in Pay-As-You-Go", w.request.Action.Summary)
+	raw := graphql(t, e.url, `mutation { approvalDecide(id: "`+w.id+`", decision: Deny) }`)
+	require.Contains(t, raw, `"approvalDecide":true`, raw)
+
+	row := e.bashCallWithin(t, azConverge, "succeeded", "failed")
+	assert.Contains(t, row.result, "kstack: the user did not approve this request.")
+	for _, r := range arm.requests() {
+		assert.False(t, strings.HasPrefix(r, http.MethodDelete), r)
+	}
+}
+
+// Approved, the delete reaches Azure once and az polls its result through
+// the door to the end.
+func TestAnApprovedAzChangePollsToItsEnd(t *testing.T) {
+	arm := newFakeARM(t)
+	e := startAzureE2E(t, arm)
+	e.ask(t, "delete azure group for real", llm.StagedCall("Bash", bashInput(`az group delete -n rg --yes && echo deleted`)))
+
+	w := e.clusterWriteWithin(t, azConverge, "pending")
+	raw := graphql(t, e.url, `mutation { approvalDecide(id: "`+w.id+`", decision: Once) }`)
+	require.Contains(t, raw, `"approvalDecide":true`, raw)
+
+	row := e.bashCallWithin(t, azConverge, "succeeded", "failed")
+	assert.Contains(t, row.result, "deleted", row.result)
+	assert.Equal(t, []string{
+		"DELETE /subscriptions/" + azSub + "/resourcegroups/rg",
+		"GET /subscriptions/" + azSub + "/operationresults/tok",
+		"GET /subscriptions/" + azSub + "/operationresults/tok",
+	}, arm.requests())
+}
+
+// One run holds the cluster and Azure: kubectl and az each read, and no
+// variable is set two ways.
+func TestAzureBesideTheCluster(t *testing.T) {
+	arm := newFakeARM(t)
+	e := startAzureE2E(t, arm)
+	e.ask(t, "kubectl and az", llm.StagedCall("Bash", bashInput(
+		`kubectl get pods -o name && az vm list --query '[].name' -o tsv && env | cut -d= -f1 | sort | uniq -d | sed 's/^/twice: /'`)))
+
+	row := e.bashCallWithin(t, azConverge, "succeeded", "failed")
+	assert.Equal(t, "succeeded", row.status, row.result)
+	assert.Contains(t, row.result, "pod/")
+	assert.Contains(t, row.result, "vm-1")
+	assert.NotContains(t, row.result, "twice:")
+}
+
+// awsLogin is the user's AWS login for an end-to-end run: these credentials,
+// in eu-west-1.
+type awsLogin aws.Credentials
+
+func (l awsLogin) Credentials(context.Context) (aws.Credentials, error) {
+	return aws.Credentials(l), nil
+}
+func (awsLogin) Drop()          {}
+func (awsLogin) Region() string { return "eu-west-1" }
+
+// With AWS turned on through the wire, a sandboxed curl signing with the run's
+// variables reads unasked, and a change waits on one request and reaches AWS
+// once approved, signed with the user's credentials; kubectl still reads the
+// cluster. With the switch off the run holds no AWS variable.
+func TestASandboxedCommandReachesAWS(t *testing.T) {
+	// Each request AWS got: its host, its body and who signed it.
+	seen := make(chan string, 8)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		signer, _, _ := strings.Cut(r.Header.Get("Authorization"), "/")
+		seen <- r.Host + " " + string(body) + " " + signer
+		_, _ = io.WriteString(w, "<DescribeInstancesResponse/>")
+	}))
+	t.Cleanup(upstream.Close)
+	client := &http.Client{Transport: &http.Transport{
+		// Every host of the table dials the test's upstream.
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
+		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // the test's own upstream
+	}}
+	login := awsLogin{AccessKeyID: "AKIAIOSFODNN7EXAMPLE", SecretAccessKey: "wJalrXUtnFEMIK7MDENGbPxRfiCYzzKEY"}
+	e := startE2E(t, func(c *Config) { c.cloudPlatforms = []bash.CloudPlatform{bash.NewAWS(login, client)} })
+	raw := graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: AWS, on: true) { target on } }`)
+	require.Contains(t, raw, `{"target":"AWS","on":true}`, raw)
+
+	curl := `curl -sS --aws-sigv4 aws:amz:eu-west-1:ec2 --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" `
+	chatID := e.ask(t, "reach AWS", llm.StagedCall("Bash", bashInput(
+		curl+`-d Action=DescribeInstances "$AWS_ENDPOINT_URL/"; echo; `+curl+`-d Action=StopInstances "$AWS_ENDPOINT_URL/"; echo; kubectl get pods -o name`)))
+
+	signed := "AWS4-HMAC-SHA256 Credential=" + login.AccessKeyID
+	assert.Equal(t, "ec2.eu-west-1.amazonaws.com Action=DescribeInstances "+signed, testutil.Recv(t, seen, "the read"))
+	w := e.clusterWrite(t, "pending")
+	require.NotNil(t, w.request.Cloud)
+	assert.Equal(t, permissions.AWS, w.request.Action.Target)
+	assert.Equal(t, "AWS: call ec2:StopInstances in eu-west-1", w.request.Action.Summary)
+	assert.Empty(t, seen, "nothing reaches AWS before the user decides")
+	raw = graphql(t, e.url, `mutation { approvalDecide(id: "`+w.id+`", decision: Once) }`)
+	require.Contains(t, raw, `"approvalDecide":true`, raw)
+	assert.Equal(t, "ec2.eu-west-1.amazonaws.com Action=StopInstances "+signed, testutil.Recv(t, seen, "the change"))
+	row := e.bashCall(t, "succeeded", "failed")
+	assert.Contains(t, row.result, "<DescribeInstancesResponse/>")
+	assert.Contains(t, row.result, "pod/")
+
+	raw = graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: AWS, on: false) { target on } }`)
+	require.Contains(t, raw, `{"target":"AWS","on":false}`, raw)
+	e.askAgain(t, chatID, false, "reach AWS", llm.StagedCall("Bash", bashInput(`echo "aws names: $(env | grep -c '^AWS_')"`)))
+	e.lastBashResult(t, "aws names: 0")
+	assert.Empty(t, seen)
+}
+
+// With GitHub turned on through the wire, and the fake cloud platform beside it, a
+// sandboxed git reads github.com unasked while kubectl still reads the
+// cluster, and a push waits on one request and lands once approved. The run
+// starting at all says no two cloud platforms set one variable two ways.
+func TestASandboxedGitReachesGitHubThroughTheDoor(t *testing.T) {
+	origin, repo := testutil.GitOrigin(t)
+	cloud := newFakeCloud(t)
+	github := bash.NewGitHub(knownTokens("gho_theUsersOwnGitHubToken0001"), githubproxy.Upstreams{
+		Git: origin.URL, API: origin.URL, Client: origin.Client(),
+	})
+	e := startE2E(t, func(c *Config) { c.cloudPlatforms = []bash.CloudPlatform{github, cloud} })
+	for _, target := range []string{"GitHub", "AWS"} {
+		raw := graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: `+target+`, on: true) { target on } }`)
+		require.Contains(t, raw, `{"target":"`+target+`","on":true}`, raw)
+	}
+
+	e.ask(t, "push to github", llm.StagedCall("Bash", bashInput(
+		`git ls-remote https://github.com/o/r.git main | grep -c .; `+
+			`kubectl get pods -o json | jq '.items | length'; `+
+			`git clone -q https://github.com/o/r.git r && cd r && `+
+			`git -c user.name=k -c user.email=k@example.com -c maintenance.auto=false commit -q --allow-empty -m pushed && `+
+			`git push -q origin HEAD:main; echo "push $?"`)))
+
+	w := e.clusterWrite(t, "pending")
+	require.NotNil(t, w.request.Cloud)
+	assert.Equal(t, permissions.GitHub, w.request.Action.Target)
+	assert.Equal(t, "GitHub: push to o/r", w.request.Action.Summary)
+	assert.Equal(t, "seeded\n", testutil.Git(t, "", "-C", repo, "log", "--format=%s", "main"), "nothing lands before the user decides")
+	raw := graphql(t, e.url, `mutation { approvalDecide(id: "`+w.id+`", decision: Once) }`)
+	require.Contains(t, raw, `"approvalDecide":true`, raw)
+
+	row := e.bashCall(t, "succeeded", "failed")
+	assert.True(t, strings.HasPrefix(row.result, "1\n2\npush 0\n"), row.result)
+	assert.Contains(t, e.cluster.requests(), "GET /api/v1/namespaces/default/pods", "kubectl reached the cluster")
+	assert.Equal(t, "pushed\nseeded\n", testutil.Git(t, "", "-C", repo, "log", "--format=%s", "main"))
+}
+
+// knownTokens answers one known token.
+type knownTokens string
+
+func (k knownTokens) Token(context.Context) (string, error) { return string(k), nil }
+func (knownTokens) Refused(string)                          {}
+
+// fakeGoogle is Google's helper and upstream for Google's real cloud platform: the
+// helper answers a token and counts its runs, and the upstream is a TLS
+// server reached whatever the host, which keeps "<method> <path>" and the
+// bearer of each request.
+type fakeGoogle struct {
+	upstream *httptest.Server
+	seen     chan string
+	runs     atomic.Int32
+}
+
+func newFakeGoogle(t *testing.T) *fakeGoogle {
+	g := &fakeGoogle{seen: make(chan string, 8)}
+	g.upstream = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.seen <- r.Method + " " + r.URL.Path + " " + r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"clusters":[{"name":"from-google"}]}`)
+	}))
+	t.Cleanup(g.upstream.Close)
+	return g
+}
+
+func (g *fakeGoogle) RoundTrip(r *http.Request) (*http.Response, error) {
+	out := r.Clone(r.Context())
+	out.URL.Host = g.upstream.Listener.Addr().String()
+	return g.upstream.Client().Transport.RoundTrip(out)
+}
+
+// cloudPlatform is Google's real cloud platform over g.
+func (g *fakeGoogle) cloudPlatform() bash.CloudPlatform {
+	src := gcpauth.New(func(context.Context, bool) ([]byte, error) {
+		g.runs.Add(1)
+		return fmt.Appendf(nil, `{"configuration":{"properties":{"core":{"account":"dev@example.com","project":"proj-1"}}},`+
+			`"credential":{"access_token":"users-google-token","token_expiry":%q}}`, time.Now().Add(time.Hour).Format(time.RFC3339)), nil
+	})
+	return bash.NewGCP(src, g)
+}
+
+// gcloudCurl is a curl sending method to path on service as gcloud does:
+// through the run's door as its proxy, with the run's token.
+func gcloudCurl(method, service, path string) string {
+	return `curl -sS -X ` + method + ` -x "http://127.0.0.1:$CLOUDSDK_PROXY_PORT" -H "Authorization: Bearer $CLOUDSDK_AUTH_ACCESS_TOKEN" ` +
+		`"http://` + service + `.gcp.kstack.invalid` + path + `"`
+}
+
+// googleOn starts the app with Google's cloud platform over g and its switch on.
+func googleOn(t *testing.T, g *fakeGoogle) *e2e {
+	e := startE2E(t, func(c *Config) { c.cloudPlatforms = []bash.CloudPlatform{g.cloudPlatform()} })
+	raw := graphql(t, e.url, `mutation { sandboxCloudAccessSet(target: GCP, on: true) { target on } }`)
+	require.Contains(t, raw, `{"target":"GCP","on":true}`, raw)
+	return e
+}
+
+func TestASandboxedGCPReadRunsUnasked(t *testing.T) {
+	g := newFakeGoogle(t)
+	e := googleOn(t, g)
+
+	e.ask(t, "list the clusters", llm.StagedCall("Bash", bashInput(gcloudCurl("GET", "container", "/v1/projects/p/locations/-/clusters"))))
+
+	assert.Equal(t, "GET /v1/projects/p/locations/-/clusters Bearer users-google-token", testutil.Recv(t, g.seen, "the read"))
+	row := e.bashCall(t, "succeeded")
+	assert.Contains(t, row.result, "from-google")
+	var asked int
+	require.NoError(t, e.db.QueryRow(`SELECT count(*) FROM approvals WHERE kind = 'action'`).Scan(&asked))
+	assert.Zero(t, asked, "a read asks nobody")
+}
+
+func TestASandboxedGCPChangeAsks(t *testing.T) {
+	g := newFakeGoogle(t)
+	e := googleOn(t, g)
+
+	e.ask(t, "delete the cluster", llm.StagedCall("Bash", bashInput(gcloudCurl("DELETE", "container", "/v1/projects/p/locations/l/clusters/dev"))))
+
+	w := e.clusterWrite(t, "pending")
+	require.NotNil(t, w.request.Cloud)
+	assert.Equal(t, permissions.GCP, w.request.Action.Target)
+	assert.Equal(t, permissions.Destructive, w.request.Action.Class)
+	assert.Equal(t, "DELETE", w.request.Cloud.Method)
+	assert.Contains(t, w.request.Cloud.Details, tools.Detail{Label: "Account", Value: "dev@example.com"})
+	assert.Empty(t, g.seen, "nothing reaches Google before the user decides")
+	raw := graphql(t, e.url, `mutation { approvalDecide(id: "`+w.id+`", decision: Once) }`)
+	require.Contains(t, raw, `"approvalDecide":true`, raw)
+	assert.Equal(t, "DELETE /v1/projects/p/locations/l/clusters/dev Bearer users-google-token", testutil.Recv(t, g.seen, "the change"))
+	e.bashCall(t, "succeeded")
+}
+
+// With the switch off, a run mounts nothing: the route is the door's 401,
+// and gcloud's helper never runs.
+func TestGCPOffServesNothing(t *testing.T) {
+	g := newFakeGoogle(t)
+	e := startE2E(t, func(c *Config) { c.cloudPlatforms = []bash.CloudPlatform{g.cloudPlatform()} })
+
+	// The door's port is the run's own, read from its kubeconfig.
+	e.ask(t, "list the clusters", llm.StagedCall("Bash", bashInput(
+		`door=$(grep -o '127\.0\.0\.1:[0-9]*' "$KUBECONFIG" | head -n 1); `+
+			`curl -s -o /dev/null -w '%{http_code}' -x "http://$door" "http://container.gcp.kstack.invalid/v1/projects/p/locations/-/clusters"; `+
+			`echo " ${CLOUDSDK_AUTH_ACCESS_TOKEN:-unset}"`)))
+
+	row := e.bashCall(t, "succeeded", "failed")
+	assert.Equal(t, "401 unset", firstLine(row.result))
+	assert.Empty(t, g.seen)
+	assert.Zero(t, g.runs.Load(), "the helper never runs")
 }
