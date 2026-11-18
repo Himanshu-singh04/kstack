@@ -21,6 +21,13 @@
       })();
     </script>
     <style>
+      /* Keep the boot mark fixed until index.css takes over the document. */
+      html,
+      body {
+        margin: 0;
+        overflow: clip;
+        overscroll-behavior: none;
+      }
       /* The mark before the bundle paints: index.css is not on the page yet, so
          this shows the scheme's icon by the .dark class the script above sets.
          Shape matches AppMark at 48px (size-12), centred the way ReadyGate

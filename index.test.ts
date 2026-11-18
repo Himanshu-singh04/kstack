@@ -19,6 +19,10 @@ import { describe, expect, it } from 'vitest';
 const html = readFileSync('index.html', 'utf8');
 
 describe('index.html boot mark', () => {
+  it('clips the document before the bundled stylesheet loads', () => {
+    expect(html).toMatch(/html,\s*body\s*\{[^}]*margin: 0;[^}]*overflow: clip;[^}]*overscroll-behavior: none;/);
+  });
+
   // The <img> attributes size the mark on frames the <style> has not reached.
   it('places the 48px static mark and drag strip inside #root, where the mount replaces them', () => {
     expect(html).toContain(
