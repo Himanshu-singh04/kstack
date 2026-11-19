@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Package connectors is the vocabulary every connector speaks. A connector is
-// one package beside this one (chatgpt, openrouter); what they share is under
-// internal/.
+// one package beside this one (chatgpt, openrouter, kstack); what they share is
+// under internal/.
 package connectors
 
 import "errors"
@@ -59,8 +59,11 @@ type State struct {
 	Session uint64
 	// Failure is why, when Failed.
 	Failure Failure
-	// Email is the account's, display only; set when Connected.
-	Email string
+	// Subject, Email and Name are the account's, display only; set when
+	// Connected.
+	Subject string
+	Email   string
+	Name    string
 	// Registered is a saved client id.
 	Registered bool
 	// RevocationUnconfirmed is a revocation the provider did not confirm, of a

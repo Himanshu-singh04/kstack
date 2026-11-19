@@ -49,8 +49,9 @@ packages each have a `CLAUDE.md` of their own, loaded when you work in them:
 | `internal/run/CLAUDE.md` | the login shell, the session, the sandbox, permissions, the cluster proxy |
 | `internal/tools/CLAUDE.md` | the box, actions and results, each tool (Bash, Read/Write/Edit, WebFetch, KubeQuery, LogsView, LogsRead, LogsWatch, web search), `fileguard`, `logsinput` |
 | `internal/agent/CLAUDE.md` | the catalog, the loop, the chat service (turn, rows, approvals, tasks, the wire errors) |
-| `internal/services/connectors/internal/oauthconn/CLAUDE.md` | the OAuth engine; `connectors/chatgpt` runs it under ChatGPT's provider |
+| `internal/services/connectors/internal/oauthconn/CLAUDE.md` | the OAuth engine, which `connectors/chatgpt` and `connectors/kstackcloud` run under their providers |
 | `internal/services/connectors/openrouter/CLAUDE.md` | the OpenRouter connector: a sign-in that grants a key, kept in the keyring |
+| `internal/services/connectors/kstackcloud/CLAUDE.md` | the Kstack Cloud connector: the Kstack Cloud account on the engine, behind `authState` and the tray |
 
 ## Layout
 
@@ -159,7 +160,8 @@ Full picture: [`docs/security-model.md`](../docs/security-model.md).
   `slog.Error("…", "err", err)` is correct; a non-string, non-error value logs as its type. A
   persisted message is rendered where it is recorded (`supervisor.Fail`). Auth projections omit
   tokens.
-- **Restored identity is display-only.** Keep `UnverifiedIdentity` and `Authenticated` out of
+- **A restored account is display-only.** The engine verifies the ID token and its nonce at
+  sign-in; at launch the account is read back from the `oauth_connections` row. Keep it out of
   authorization.
 - **The sidecar runs the user's `az`** (`services/azureauth`), off `PATH`, with fixed arguments but
   for a tenant the account holds; its output is never logged or kept, and a token it gives is held
@@ -189,18 +191,12 @@ discovery drops every held token**, and a token `az` gave while one completed is
 may have signed in as someone else. Every failure is `ErrNoToken`. →
 [ADR](../docs/adr/2026-11-17-a-sandboxed-command-reaches-azure-through-a-token-injecting-proxy.md).
 
-## Auth / identity (`internal/services/auth`)
-
-Local-first accounts against kstack-cloud's Hydra: system browser (auth-code + PKCE, loopback redirect), verification via go-oidc, refresh token in the OS keyring. Signed-in ⇔ refresh token present; works offline; degrades to signed-out when unconfigured. → [ADR: local-first auth](../docs/adr/2026-08-09-local-first-auth-settings.md).
-
-- Flat root package by file: `auth.go`, `grant.go` (token set as source of truth, lazy refresh with burst-dedup, persist-before-cache), `login.go`, `keyring.go`. `lib/oauth` is a vendor-neutral leaf importing neither `auth` nor the connectors; `lib/oauth/browser` (loopback, opener) is shared with the connectors, whose engine `auth` cannot import.
-- `Config` carries production knobs only; test seams are unexported options on `newWithOptions`. `Logout` clears locally first, revokes fire-and-forget.
-- `TokenSource(ctx)` is nil when degraded; consumers read `AccessToken` only. The GraphQL projection drops tokens.
-
 ## Connectors (`internal/services/connectors`)
 
-**A connector is one package with one surface**: `chatgpt`, `openrouter`. The root package is
-their vocabulary; what they share (`oauthconn`, `catalogsync`, `signer`) is in `internal/`. → [ADR](../docs/adr/2026-11-19-a-connector-is-one-package-and-its-machinery-is-internal.md).
+**A connector is an account on a service that Kstack signs in to, and whose requests it may then
+sign**, one package each: `chatgpt`, `openrouter`, and `kstackcloud`, the Kstack Cloud account, which signs
+nothing. Each has `New`, `State`, `Subscribe`, `Connect`, `Disconnect` and `Close`; a model
+provider adds a catalog and a signer. The root package is their vocabulary; what they share (`oauthconn`, `catalogsync`, `signer`) is in `internal/`. → [ADR](../docs/adr/2026-11-19-a-connector-is-one-package-and-its-machinery-is-internal.md).
 
 **`catalogsync` keeps a signed-in provider's catalog the account's**, its only writer: read per
 connected session, on a poke and every six hours, emptied otherwise. A connector's `SyncCatalog`
