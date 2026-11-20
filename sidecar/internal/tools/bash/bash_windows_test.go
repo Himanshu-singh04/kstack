@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,11 +56,11 @@ func TestNewDeclinesWithoutGitBash(t *testing.T) {
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "bash.exe"), []byte("MZ"), 0o700))
 	t.Setenv("PATH", bin)
-	_, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, Cloud{})
+	_, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, nil, Cloud{})
 	assert.False(t, ok, "a bash.exe on PATH must not be found")
 
 	stubInstallPath(t, t.TempDir(), true) // recorded, but bin\bash.exe absent
-	_, ok = New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, Cloud{})
+	_, ok = New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, nil, Cloud{})
 	assert.False(t, ok)
 }
 
@@ -69,7 +70,7 @@ func TestNewFindsTheRecordedBash(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(install, "bin"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(install, "bin", "bash.exe"), []byte("MZ"), 0o700))
 	stubInstallPath(t, install, true)
-	tl, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, Cloud{})
+	tl, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, nil, Cloud{})
 	require.True(t, ok)
 	assert.Equal(t, filepath.Join(install, "bin", "bash.exe"), tl.shell)
 }
@@ -79,7 +80,7 @@ func TestNewFindsGitBash(t *testing.T) {
 	if _, ok := registryInstallPath(); !ok {
 		t.Skip("no Git for Windows install record on this machine")
 	}
-	_, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, Cloud{})
+	_, ok := New(Paths{ShellDir: t.TempDir()}, 0, nil, nil, nil, nil, Cloud{})
 	assert.True(t, ok)
 }
 
@@ -168,6 +169,26 @@ func TestEnvNameOfAnEntryWithNoSeparator(t *testing.T) {
 	assert.Equal(t, "PATH", envName("PATH"))
 	assert.Equal(t, "PATH", envName("PATH=x"))
 	assert.Equal(t, "=C:", envName(`=C:=C:\x`))
+	assert.Empty(t, envName(""))
+}
+
+// An entry of extra replaces the process's own of its name, which Windows
+// compares without case, so the child reads the one given.
+func TestAnExtraEntryReplacesTheProcesssOwn(t *testing.T) {
+	t.Setenv("KSTACK_TEST_MARK", "process")
+
+	block, err := environBlock([]string{"kstack_test_mark=extra"})
+	require.NoError(t, err)
+
+	var marks []string
+	for len(block) > 1 {
+		i := slices.Index(block, 0)
+		if e := windows.UTF16ToString(block[:i]); strings.EqualFold(envName(e), "KSTACK_TEST_MARK") {
+			marks = append(marks, e)
+		}
+		block = block[i+1:]
+	}
+	assert.Equal(t, []string{"kstack_test_mark=extra"}, marks)
 }
 
 var errInjected = errors.New("injected")

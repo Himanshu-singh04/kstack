@@ -20,16 +20,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/kstackhq/kstack/sidecar/internal/tools/internal/fileguard"
 )
 
 // outsideEnv is a run's environment outside the sandbox: the process's whole,
-// then what Kstack adds, then PWD. exec sets PWD from Dir only when Env is nil;
-// without it the shell keeps the sidecar's, finds it wrong and reads the
-// physical path, so pwd would print something other than the directory the
-// approval request showed.
+// then kstack, the user's approved variables followed by what Kstack adds, then
+// PWD. exec sets PWD from Dir only when Env is nil; without it the shell keeps
+// the sidecar's, finds it wrong and reads the physical path, so pwd would print
+// something other than the directory the approval request showed.
 func outsideEnv(environ, kstack []string, dir string) []string {
 	env := make([]string, 0, len(environ)+len(kstack)+1)
 	env = append(env, environ...)
@@ -37,18 +38,36 @@ func outsideEnv(environ, kstack []string, dir string) []string {
 	return append(env, "PWD="+dir)
 }
 
+// lastOfEachName is env with only the last entry of each name kept, in order,
+// as exec.Cmd keeps it on Unix. Windows hands a child the whole block and the
+// child reads the first, so there the block is built through this. key is an
+// entry's name as the platform compares it.
+func lastOfEachName(env []string, key func(entry string) string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(env))
+	for _, e := range slices.Backward(env) {
+		if k := key(e); !seen[k] {
+			seen[k] = true
+			out = append(out, e)
+		}
+	}
+	slices.Reverse(out)
+	return out
+}
+
 // sandboxedRunEnv is a sandboxed run's environment, built from one table so
 // nothing of the sidecar's rides in but LANG and TZ: PATH the run's own, the
-// folders it froze at its start; HOME the workspace
-// and PWD the start directory; TMPDIR the run's own, in the cache; ZDOTDIR
-// the run's directory, made for the run and so holding no startup file, so
-// zsh -c never sources a .zshenv a command left in the workspace; KUBECONFIG
-// and KUBECACHEDIR for a run with a cluster (cluster not nil); LANG the
-// sidecar's or the platform's default; TERM=dumb; then the variables that
-// point each tool into toolHome; then toolchain, each found location's
-// variables and asdf's versions; then cloud, each mounted cloud platform's
-// variables (cloudEnv); then what Kstack adds.
-func sandboxedRunEnv(environ, kstack []string, path, workspace, dir string, rd *runDir, cluster *target, toolHome string, toolchain, cloud []string) []string {
+// folders it froze at its start; HOME the workspace and PWD the start
+// directory; TMPDIR the run's own, in the cache; ZDOTDIR the run's directory,
+// made for the run and so holding no startup file, so zsh -c never sources a
+// .zshenv a command left in the workspace; KUBECONFIG and KUBECACHEDIR for a
+// run with a cluster (cluster not nil); LANG the sidecar's or the platform's
+// default, and its TZ; then user, the user's variables, which may repeat LANG
+// or TZ to replace it but name nothing else of the table (envvars.Check);
+// TERM=dumb; then the variables that point each tool into toolHome; then
+// toolchain, each found location's variables and asdf's versions; then cloud,
+// each mounted cloud platform's variables (cloudEnv); then what Kstack adds.
+func sandboxedRunEnv(environ, kstack []string, path, workspace, dir string, rd *runDir, cluster *target, toolHome string, user, toolchain, cloud []string) []string {
 	var lang, tz string
 	for _, kv := range environ {
 		name, value, _ := strings.Cut(kv, "=")
@@ -71,6 +90,7 @@ func sandboxedRunEnv(environ, kstack []string, path, workspace, dir string, rd *
 	if tz != "" {
 		env = append(env, "TZ="+tz)
 	}
+	env = append(env, user...)
 	env = append(env, "TERM=dumb")
 	env = append(env, toolHomeEnv(toolHome)...)
 	env = append(env, toolchain...)

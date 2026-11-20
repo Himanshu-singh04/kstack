@@ -39,7 +39,7 @@ func TestUnpassableMatchesNamesAndPrefixes(t *testing.T) {
 // AZURE_CONFIG_DIR.
 func TestNeverEnvHoldsTheRules(t *testing.T) {
 	for _, name := range []string{
-		"SSH_AUTH_SOCK", "GITHUB_TOKEN", "GH_TOKEN", "DOCKER_HOST", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+		"SSH_AUTH_SOCK", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_ENTERPRISE_TOKEN", "DOCKER_HOST", "DYLD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
 		"DYLD_FRAMEWORK_PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "BASH_ENV", "ENV", "PROMPT_COMMAND",
 		"AWS_SESSION_TOKEN", "AWS_PROFILE",
 		"AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PASSWORD", "AZURE_STORAGE_CONNECTION_STRING",
@@ -58,4 +58,28 @@ func TestNeverEnvIsACopy(t *testing.T) {
 	rules[0].Name = "PATH"
 
 	assert.False(t, Unpassable("PATH"))
+}
+
+// What the run's table sets is refused by name, and the prefixes take every
+// variable of their tool's config.
+func TestKstackSetsNamesTheTablesVariables(t *testing.T) {
+	for _, name := range []string{
+		"PATH", "HOME", "PWD", "TMPDIR", "ZDOTDIR", "KUBECONFIG", "KUBECACHEDIR", "TERM",
+		"KSTACK", "KSTACK_SIDECAR_PID", "ASDF_KUBECTL_VERSION", "CLOUDSDK_CORE_PROJECT",
+		"GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "AWS_ENDPOINT_URL", "npm_config_cache", "AZURE_CONFIG_DIR", "HTTPS_PROXY", "no_proxy",
+	} {
+		assert.True(t, KstackSets(name), name)
+	}
+	for _, name := range []string{"LANG", "TZ", "HELM_NAMESPACE", "KUBECTL_EXTERNAL_DIFF", "EDITOR"} {
+		assert.False(t, KstackSets(name), name)
+	}
+}
+
+// Every variable a toolchain location sets is one the table sets.
+func TestKstackSetsEveryToolchainVariable(t *testing.T) {
+	for _, l := range sharedLists.Toolchain {
+		for name := range l.Env {
+			assert.True(t, KstackSets(name), "%s's %s", l.Name, name)
+		}
+	}
 }

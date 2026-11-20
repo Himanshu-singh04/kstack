@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/kstackhq/kstack/sidecar/graph"
 	"github.com/kstackhq/kstack/sidecar/internal/agent/catalog"
@@ -29,6 +30,7 @@ import (
 	"github.com/kstackhq/kstack/sidecar/internal/services/connectors/google"
 	"github.com/kstackhq/kstack/sidecar/internal/services/connectors/kstackcloud"
 	"github.com/kstackhq/kstack/sidecar/internal/services/connectors/openrouter"
+	"github.com/kstackhq/kstack/sidecar/internal/services/envvars"
 	"github.com/kstackhq/kstack/sidecar/internal/services/kubeconfig"
 	"github.com/kstackhq/kstack/sidecar/internal/services/logs"
 	"github.com/kstackhq/kstack/sidecar/internal/services/logs/logstore"
@@ -69,6 +71,8 @@ type Runtime struct {
 	ProviderKeys *providerkeys.Service
 	Catalog      catalog.Catalog
 	LLM          *llm.Service
+	// EnvVars is the user's variables, which every command reads.
+	EnvVars *envvars.Service
 	// Shell is nil on a machine with no shell.
 	Shell         *bash.Tool
 	SandboxStatus sandbox.Status
@@ -277,9 +281,15 @@ func build(ctx context.Context, cfg Config) (*Runtime, error) {
 		}))
 	}
 
+	rt.EnvVars, err = envvars.New(db, time.Now)
+	if err != nil {
+		return fail(err)
+	}
+	rt.add("user's variables", lifecycle.CloseFunc(rt.EnvVars.Close))
+
 	pathList := func() settings.RunPath { return settingsStore.Get().RunPath() }
 	platforms := cloudPlatformsFor(probed, cfg.cloudPlatforms, rt.Kubeconfig, rt.GitHub)
-	shell, found := bash.New(p.Bash, cfg.HostPID, sb, rt.Cluster, pathList, bash.Cloud{Platforms: platforms, On: settingsStore.CloudOn})
+	shell, found := bash.New(p.Bash, cfg.HostPID, sb, rt.Cluster, pathList, rt.EnvVars.For, bash.Cloud{Platforms: platforms, On: settingsStore.CloudOn})
 	if found && cfg.callDeadline != nil {
 		shell.SetCallDeadline(cfg.callDeadline)
 	}
@@ -369,6 +379,7 @@ func (rt *Runtime) resolver() *graph.Resolver {
 		ProviderKeys:  rt.ProviderKeys,
 		OpenURL:       browser.Open,
 		Settings:      rt.Settings,
+		EnvVars:       rt.EnvVars,
 		Executables:   prober,
 		Logs:          rt.Logs,
 		CloudTargets:  rt.CloudTargets,
