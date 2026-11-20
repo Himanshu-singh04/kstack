@@ -3,6 +3,7 @@ title: A provider's credential follows one order
 date: 2026-11-20
 scope: cross-cutting
 status: Accepted
+amended_by: [Every provider is one row, signed by one service](2026-11-20-every-provider-is-one-row-signed-by-one-service.md)
 ---
 
 # A provider's credential follows one order
@@ -27,7 +28,7 @@ provider's order only when it signs that provider's own endpoint, which today is
 `gemini` (the Gemini API) and `google` (Vertex AI) are two providers, so a Gemini key no longer
 hides Vertex AI.
 
-**Every keyed provider is signed by one service, `services/providerkeys`.** It holds each provider's
+**Every keyed provider is signed by one service, `services/providercredentials`.** It holds each provider's
 environment key and saved key (in the OS keyring, one entry per provider), knows the provider's
 connector, and is the provider's `llm.SessionSigner`. Every keyed provider is in `llm.Service` from
 launch and lists its written catalog only while it has a credential, so a saved key needs no
@@ -35,7 +36,7 @@ restart.
 
 **A key's header is chosen by the request's base URL**, not by the model's dialect. Each provider
 lists its routes, every base its models are sent to with the header a key goes in there
-(`catalog.KeyedProviders`); a request under none of them is refused unsigned. This amends *a key as
+(`catalog.Providers`); a request under none of them is refused unsigned. This amends *a key as
 one more `Signer`* in [a provider's credential is a key or a
 signer](2026-11-18-a-providers-credential-is-a-key-or-a-signer.md): the dialect still picks the
 header, once per route, through `llm.Provider.AuthHeader`.

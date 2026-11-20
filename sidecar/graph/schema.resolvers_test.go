@@ -53,7 +53,7 @@ import (
 	"github.com/kstackhq/kstack/sidecar/internal/services/logs/logstore"
 	logsrefusal "github.com/kstackhq/kstack/sidecar/internal/services/logs/refusal"
 	"github.com/kstackhq/kstack/sidecar/internal/services/memory"
-	"github.com/kstackhq/kstack/sidecar/internal/services/providerkeys"
+	"github.com/kstackhq/kstack/sidecar/internal/services/providercredentials"
 	"github.com/kstackhq/kstack/sidecar/internal/services/settings"
 	"github.com/kstackhq/kstack/sidecar/internal/tools"
 	"github.com/kstackhq/kstack/sidecar/internal/tools/agent"
@@ -4346,35 +4346,39 @@ func connectorConstants(t *testing.T) (phases, failures []string) {
 	return phases, failures
 }
 
-// providerKeysServer serves a provider keys service over k, with one keyed
+// providerCredentialsServer serves a provider credentials service over k, with one keyed
 // provider holding an environment key.
-func providerKeysServer(t *testing.T, k *oskeyringtest.Keyring) (*httptest.Server, *providerkeys.Service) {
+func providerCredentialsServer(t *testing.T, k *oskeyringtest.Keyring) (*httptest.Server, *providercredentials.Service) {
 	t.Helper()
-	keys, err := providerkeys.New(providerkeys.Config{
+	keys, err := providercredentials.New(providercredentials.Config{
 		Keyring:   k,
-		Providers: catalog.KeyedProviders(nil),
+		Providers: catalog.Providers(nil, ""),
 		EnvKeys:   map[string]string{"anthropic": "sk-ant-env-0123456789abcdef"},
 	})
 	require.NoError(t, err)
 	t.Cleanup(keys.Close)
-	srv := httptest.NewServer(graph.NewServer(context.Background(), &graph.Resolver{ProviderKeys: keys, LLMSvc: llm.New()}))
+	srv := httptest.NewServer(graph.NewServer(context.Background(), &graph.Resolver{ProviderCredentials: keys, LLMSvc: llm.New()}))
 	t.Cleanup(srv.Close)
 	return srv, keys
 }
 
-// The query lists every keyed provider with where its credential comes from,
-// and no key.
+// The query lists every provider with where its credential comes from, and no
+// key. One that takes no key has no key variable.
 func TestProviderCredentialsProjectTheState(t *testing.T) {
-	srv, _ := providerKeysServer(t, oskeyringtest.New())
+	srv, _ := providerCredentialsServer(t, oskeyringtest.New())
 
 	data, errs := mutation(t, srv.URL, `query { providerCredentials { id label keyVariable source hasEnvironmentKey hasSavedKey failure } }`)
 	require.Empty(t, errs)
 	rows := data["providerCredentials"].([]any)
-	require.Len(t, rows, len(catalog.KeyVars()))
+	require.Len(t, rows, len(catalog.Providers(nil, "")))
 	assert.Equal(t, map[string]any{
 		"id": "anthropic", "label": "Anthropic", "keyVariable": "ANTHROPIC_API_KEY",
 		"source": "EnvironmentKey", "hasEnvironmentKey": true, "hasSavedKey": false, "failure": nil,
 	}, rows[0])
+	assert.Equal(t, map[string]any{
+		"id": "chatgpt", "label": "ChatGPT plan", "keyVariable": nil,
+		"source": "None", "hasEnvironmentKey": false, "hasSavedKey": false, "failure": nil,
+	}, rows[len(rows)-1])
 }
 
 // A save and a delete drive the service; the watch is a gauge that follows
@@ -4382,7 +4386,7 @@ func TestProviderCredentialsProjectTheState(t *testing.T) {
 func TestProviderKeyMutationsAndWatch(t *testing.T) {
 	const key = "gsk-wire-0123456789abcdef"
 	k := oskeyringtest.New()
-	srv, keys := providerKeysServer(t, k)
+	srv, keys := providerCredentialsServer(t, k)
 	resp := openSSESubscription(t, srv.URL, "", `subscription { providerCredentialsWatch { id source hasSavedKey failure } }`)
 	defer resp.Body.Close()
 	events := sseEvents(t, resp)
@@ -4415,13 +4419,16 @@ func TestProviderKeyMutationsAndWatch(t *testing.T) {
 // Each refusal reaches the wire as its code.
 func TestProviderKeyRefusals(t *testing.T) {
 	k := oskeyringtest.New()
-	srv, _ := providerKeysServer(t, k)
+	srv, _ := providerCredentialsServer(t, k)
 	k.FailSet = errors.New("locked")
 	for op, code := range map[string]string{
 		`mutation { providerKeySave(providerID: "nope", key: "key-0123456789abcdef") }`: "KSTACK_VALIDATION_ERROR",
 		`mutation { providerKeySave(providerID: "groq", key: "short") }`:                "KSTACK_VALIDATION_ERROR",
 		`mutation { providerKeySave(providerID: "groq", key: "key-0123456789abcdef") }`: "KSTACK_PROVIDER_KEY_NOT_SAVED",
 		`mutation { providerKeyDelete(providerID: "nope") }`:                            "KSTACK_VALIDATION_ERROR",
+		// A provider that takes no key.
+		`mutation { providerKeySave(providerID: "chatgpt", key: "key-0123456789abcdef") }`: "KSTACK_VALIDATION_ERROR",
+		`mutation { providerKeyDelete(providerID: "chatgpt") }`:                            "KSTACK_VALIDATION_ERROR",
 	} {
 		_, errs := mutation(t, srv.URL, op)
 		require.Len(t, errs, 1, op)
@@ -4439,7 +4446,7 @@ func TestProviderKeySaveReturnsAndLogsNoKey(t *testing.T) {
 
 	const saved, refused = "sk-wire-saved-0123456789abcdef", "sk-wire-refused-0123456789abcdef"
 	k := oskeyringtest.New()
-	srv, _ := providerKeysServer(t, k)
+	srv, _ := providerCredentialsServer(t, k)
 	var bodies []string
 	for _, key := range []string{saved, refused} {
 		bodies = append(bodies, string(postGQL(t, srv.URL, `{"query":"mutation { providerKeySave(providerID: \"groq\", key: \"`+key+`\") }"}`)))
