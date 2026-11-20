@@ -76,6 +76,19 @@ func (p Provider) ForModel(m Model) Provider {
 	return p
 }
 
+// AuthHeader is the header a static key goes in, and what precedes the key
+// there: the provider's KeyHeader, else the dialect's own.
+func (p Provider) AuthHeader() (name, prefix string) {
+	switch {
+	case p.KeyHeader != "":
+		return p.KeyHeader, ""
+	case p.Dialect == DialectMessages:
+		return "X-Api-Key", ""
+	default:
+		return "Authorization", "Bearer "
+	}
+}
+
 // AffinityRoute is where Request.AffinityKey goes on a provider's endpoint: one
 // of the two, or neither to send it nowhere.
 type AffinityRoute struct {
@@ -98,10 +111,19 @@ type Signer interface {
 // SessionSigner is a Signer whose credential belongs to a session that can end.
 type SessionSigner interface {
 	Signer
-	// Bind is a Signer for the current session alone: once that session ends it
-	// fails with ErrSignedOut, whatever session has replaced it.
+	// Bind is a binding: a Signer for the current session alone. Each session
+	// has a generation, and a binding ends when the generation moves: it then
+	// fails with ErrSignedOut or ErrCredentialChanged, whatever session has
+	// replaced it. A generation moves exactly when work under it must stop:
+	// another account or key, or none. A token rotated within a session does
+	// not move it.
 	Bind() Signer
 }
 
-// ErrSignedOut is a Signer with no session to sign under.
-var ErrSignedOut = errors.New("llm: signed out")
+var (
+	// ErrSignedOut is a Signer with no session to sign under.
+	ErrSignedOut = errors.New("llm: signed out")
+	// ErrCredentialChanged is a binding whose provider is now signed by another
+	// credential.
+	ErrCredentialChanged = errors.New("llm: credential changed")
+)

@@ -23,6 +23,7 @@ import (
 	"github.com/kstackhq/kstack/sidecar/internal/services/logs/iso8601"
 	"github.com/kstackhq/kstack/sidecar/internal/services/logs/refusal"
 	"github.com/kstackhq/kstack/sidecar/internal/services/memory"
+	"github.com/kstackhq/kstack/sidecar/internal/services/providerkeys"
 	"github.com/kstackhq/kstack/sidecar/internal/services/settings"
 	"github.com/kstackhq/kstack/sidecar/internal/tools"
 	"github.com/kstackhq/kstack/sidecar/internal/tools/bash"
@@ -158,13 +159,26 @@ func memoryErr(err error) error {
 }
 
 // connectorErr is a refused Connect or Disconnect as the wire codes it: during
-// an attempt, while connected, while the environment holds a key, while a
-// key the keyring would not delete is still there, or with no OAuth client.
+// an attempt, while connected, while a key the keyring would not delete is
+// still there, or with no OAuth client.
 func connectorErr(err error) error {
-	for _, refusal := range []error{connectors.ErrSigningIn, connectors.ErrConnected, connectors.ErrFromEnvironment, connectors.ErrNotDeleted, connectors.ErrNoClient} {
+	for _, refusal := range []error{connectors.ErrSigningIn, connectors.ErrConnected, connectors.ErrNotDeleted, connectors.ErrNoClient} {
 		if errors.Is(err, refusal) {
 			return gqlerrors.Clone(gqlerrors.ErrValidationError)
 		}
+	}
+	return err
+}
+
+// providerKeyErr is a refused Save or Delete as the wire codes it.
+func providerKeyErr(err error) error {
+	switch {
+	case errors.Is(err, providerkeys.ErrUnknownProvider), errors.Is(err, providerkeys.ErrBadKey):
+		return gqlerrors.Clone(gqlerrors.ErrValidationError)
+	case errors.Is(err, providerkeys.ErrNotSaved):
+		return gqlerrors.Clone(gqlerrors.ErrProviderKeyNotSaved)
+	case errors.Is(err, providerkeys.ErrNotDeleted):
+		return gqlerrors.Clone(gqlerrors.ErrProviderKeyNotDeleted)
 	}
 	return err
 }

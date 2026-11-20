@@ -927,7 +927,7 @@ type ClusterCachedDataObjectWatchFrame {
 }
 
 # --- Models ---
-# What the sidecar can answer with. The catalog is whatever had a key at startup; a
+# What the sidecar can answer with. A keyed provider lists its models while it has a credential; a
 # feature that calls a model names one of these per call. A provider is named by its
 # id, a string rather than an enum: a provider is data, and one added at runtime has
 # no member.
@@ -966,6 +966,45 @@ type Model {
   efforts: [String!]!
   "The level a picker starts on. Empty when `efforts` is."
   defaultEffort: String!
+}
+
+# --- Provider credentials ---
+# Where each keyed provider's credential comes from. A key typed into the Providers pane is
+# saved in the OS keyring; no key ever leaves the sidecar.
+
+"Which credential signs a provider's requests. The highest one present does: Connector, then SavedKey, then EnvironmentKey."
+enum ProviderCredentialSource {
+  None
+  "The key variable, from the launch or the login shell."
+  EnvironmentKey
+  "A key saved from the Providers pane, in the OS keyring."
+  SavedKey
+  "The provider's connector, while it is connected."
+  Connector
+}
+
+"What is wrong with a provider's key."
+enum ProviderKeyFailure {
+  "The keyring would not delete the saved key. It is out of use now and returns after a restart; providerKeyDelete retries."
+  NotDeleted
+  "The provider answered 401 to the key that signs. The key is kept and still used. Never reported while NotDeleted is."
+  KeyRejected
+}
+
+"A provider whose key can be set, and where its credential comes from. No key is ever here."
+type ProviderCredentialState {
+  "The provider's id, as Provider.id."
+  id: String!
+  label: String!
+  "The environment variable its key is read from."
+  keyVariable: String!
+  source: ProviderCredentialSource!
+  "Whether the launch held the key variable."
+  hasEnvironmentKey: Boolean!
+  "Whether a saved key is held."
+  hasSavedKey: Boolean!
+  "Null when nothing is wrong."
+  failure: ProviderKeyFailure
 }
 
 # --- Chat ---
@@ -2008,8 +2047,6 @@ enum ConnectorPhase {
   "The browser is open on the provider's sign-in."
   SigningIn
   Connected
-  "The provider's key from the environment signs in the connector's place; the connector is unused."
-  FromEnvironment
   "The last attempt, session or key ended; `failure` says why."
   Failed
 }
@@ -2230,6 +2267,10 @@ type Query {
   "Every model the sidecar can answer with, in catalog order — the first entry is what a picker starts on. The ChatGPT plan's models come and go with its connection; modelsWatch follows them."
   models: [Model!]!
 
+  # --- Provider credentials ---
+  "Every provider whose key can be set, in picker order; live updates via providerCredentialsWatch."
+  providerCredentials: [ProviderCredentialState!]!
+
   # --- Sandbox ---
   "Whether this machine offers sandboxed Bash, and why."
   sandbox: SandboxStatus!
@@ -2315,6 +2356,12 @@ type Query {
 }
 
 type Mutation {
+  # --- Provider credentials ---
+  "Save a provider's API key in the OS keyring, replacing any saved one. Always true when it does not error. It signs the provider's requests from the next one, unless its connector is connected. The key is not checked against the provider. Never returns the key. Refused (KSTACK_VALIDATION_ERROR) for an unknown provider and for a key that, once trimmed of surrounding whitespace, is under 16 or over 512 bytes or holds a space or anything but printable ASCII; KSTACK_PROVIDER_KEY_NOT_SAVED when the keyring refused, and nothing changed."
+  providerKeySave(providerID: String!, key: String!): Boolean!
+  "Delete a provider's saved key. Always true when it does not error, including when none was saved; an entry a newer Kstack wrote is left in the keyring. KSTACK_PROVIDER_KEY_NOT_DELETED when the keyring refused: the key is out of use, returns after a restart, and calling again retries. Refused (KSTACK_VALIDATION_ERROR) for an unknown provider."
+  providerKeyDelete(providerID: String!): Boolean!
+
   # --- Cluster ---
   "Enable or disable a cluster in the app. Disabling keeps the record tracked but dormant (no connection, hidden from context pickers). Returns the updated cluster."
   clusterEnabledSet(id: ClusterID!, enabled: Boolean!): Cluster!
@@ -2437,11 +2484,11 @@ type Mutation {
   "Open ChatGPT's usage settings in the browser. The address is the sidecar's constant."
   chatGPTUsageOpen: Boolean!
   # --- OpenRouter connector ---
-  "Open the browser on OpenRouter's sign-in. Returns once the attempt starts or fails; the outcome, a browser that could not open or a keyring that cannot keep the key included, arrives on openRouterConnectionWatch. Refused (KSTACK_VALIDATION_ERROR) during an attempt, while connected, while the environment holds a key, and while a key the keyring would not delete is still there."
+  "Open the browser on OpenRouter's sign-in. Returns once the attempt starts or fails; the outcome, a browser that could not open or a keyring that cannot keep the key included, arrives on openRouterConnectionWatch. Refused (KSTACK_VALIDATION_ERROR) during an attempt, while connected, and while a key the keyring would not delete is still there."
   openRouterConnect: Boolean!
   "End a sign-in under way. Returns true; a no-op otherwise."
   openRouterConnectCancel: Boolean!
-  "Delete the key on this machine. The key stays live on OpenRouter until the user deletes it there. Errors when the key could not be deleted; the state is then Failed with NotDeleted, and calling again retries. Refused (KSTACK_VALIDATION_ERROR) while the environment holds a key."
+  "Delete the key on this machine. The key stays live on OpenRouter until the user deletes it there. Errors when the key could not be deleted; the state is then Failed with NotDeleted, and calling again retries. The provider's saved key, then its environment key, signs in its place."
   openRouterDisconnect: Boolean!
   "Open OpenRouter's key settings in the browser. The address is the sidecar's constant."
   openRouterKeysOpen: Boolean!
@@ -2591,4 +2638,8 @@ type Subscription {
   # --- Model ---
   "GAUGE. Every model the sidecar can answer with, as the models query lists them, a fresh list each time a provider's catalog changes."
   modelsWatch: [Model!]!
+
+  # --- Provider credentials ---
+  "GAUGE. Every provider whose key can be set: the latest list after each change, so changes close together arrive as one."
+  providerCredentialsWatch: [ProviderCredentialState!]!
 }
