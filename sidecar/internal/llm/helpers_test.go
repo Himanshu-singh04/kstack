@@ -22,12 +22,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kstackhq/kstack/sidecar/internal/lib/testutil"
+	"github.com/kstackhq/kstack/sidecar/internal/lib/version"
 	"github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -267,4 +269,20 @@ func TestASignEndedByItsRequestIsNoCredentialError(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	var e *Error
 	assert.False(t, errors.As(err, &e), "%v", err)
+}
+
+func TestSignedDoNamesKstack(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("User-Agent")
+	}))
+	t.Cleanup(srv.Close)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := SignedDo(Provider{ID: "p"}, req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, "kstack/"+version.Version, got)
 }

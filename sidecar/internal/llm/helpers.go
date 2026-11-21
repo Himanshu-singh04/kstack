@@ -27,6 +27,8 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+
+	"github.com/kstackhq/kstack/sidecar/internal/lib/version"
 )
 
 // What the wires share: the idle guard every stream runs under, the ids a
@@ -175,10 +177,15 @@ func authorize(p Provider, r *http.Request) error {
 	return nil
 }
 
-// send is every wire's middleware: authorize, send, and tell a signer of a
-// 401. A redirect fails here, since NoRedirectClient follows none and the SDKs
-// read a 3xx as an answer.
+// userAgent names Kstack to every vendor, in place of the SDK's or Go's own
+// name: some vendors watch for anonymous clients.
+var userAgent = "kstack/" + version.Version
+
+// send is every wire's middleware: name Kstack, authorize, send, and tell a
+// signer of a 401. A redirect fails here, since NoRedirectClient follows none
+// and the SDKs read a 3xx as an answer.
 func send(p Provider, r *http.Request, next func(*http.Request) (*http.Response, error)) (*http.Response, error) {
+	r.Header.Set("User-Agent", userAgent)
 	if err := authorize(p, r); err != nil {
 		// A cancel or an idle trip while the signer waited ends the request,
 		// not the credential.
@@ -204,7 +211,8 @@ func send(p Provider, r *http.Request, next func(*http.Request) (*http.Response,
 }
 
 // SignedDo sends req as every wire sends a request of p: authorized, following
-// no redirect, a signer told of a 401.
+// no redirect, a signer told of a 401. Its User-Agent is always Kstack's,
+// whatever req carries.
 func SignedDo(p Provider, req *http.Request) (*http.Response, error) {
 	return send(p, req, NoRedirectClient.Do)
 }
