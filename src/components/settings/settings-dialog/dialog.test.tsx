@@ -66,6 +66,7 @@ vi.mock('./providers', async () => {
 
 vi.mock('./memory', () => ({ MemorySettings: () => <p>The memory</p> }));
 vi.mock('./environment', () => ({ EnvironmentSettings: () => <p>The environment</p> }));
+vi.mock('./tools', () => ({ ToolsSettings: () => <p>The tools</p> }));
 
 const { ThemeProvider } = await import('@/lib/theme');
 const { SettingsDialog } = await import('./dialog');
@@ -86,9 +87,10 @@ const NAMES = [
   'Providers',
   'Memory',
   'Environment',
-  'Monitoring',
   'Sandbox',
   'Permissions',
+  'Tools',
+  'Monitoring',
 ];
 
 beforeEach(() => {
@@ -169,6 +171,15 @@ describe('SettingsDialog', () => {
 
     expect(screen.getByRole('tab', { name: 'Connectors', selected: true })).toBeInTheDocument();
     expect(screen.getByRole('tabpanel')).toHaveTextContent('The connectors');
+  });
+
+  it('draws the Tools tab', async () => {
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(await screen.findByRole('tab', { name: 'Tools' }));
+
+    expect(screen.getByRole('tabpanel')).toHaveTextContent('The tools');
   });
 
   it('draws the Memory tab', async () => {
