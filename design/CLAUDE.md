@@ -12,7 +12,7 @@ How the webview's design in Figma maps to the code in `src/`, and how agents syn
 Every group on a page is a Figma section, laid out so that no two overlap. A new component or screen goes in its group's section, and the section grows to fit it.
 
 - **Components** has one section per folder of `src/components/`. Each section names its folder under its title and stacks its components top to bottom. A popup gets a nested section of its own.
-- **Screens** has one section per screen. A screen's section holds its *Kstack Light* frame, then its *Kstack Dark* frame, and above them its [stamp](#manifest), a text layer named `Stamp`.
+- **Screens** has one section per area of the app (*Shell*, *Chat*, …), laid out left to right. Each area stacks its screens' sections top to bottom: the area's states first, then the screens that draw a popup open. A screen's section holds its *Kstack Light* frame, then its *Kstack Dark* frame, and above them its [stamp](#manifest), a text layer named `Stamp`. A screen drawn in several states or platforms gives each one a row, light on the left and dark on the right, so every area reads as a light column beside a dark one. An area section holds only sections, so it is not a screen.
 - The layers panel lists sections in the order the canvas shows them.
 
 ## Tokens
@@ -68,7 +68,7 @@ Every group on a page is a Figma section, laid out so that no two overlap. A new
 
 `changes` lists what the design has that the code lacks, one plain sentence each. It is absent when there is none. A person may write a stamp by hand, spaced as they like. A component with no stamp is new: stamping it adds its entry here.
 
-**A screen's stamp is the same JSON in its section's `Stamp` text layer**, since a section has no description. The layer is a direct child of the section, outside every frame.
+**A screen's stamp is the same JSON in its section's `Stamp` text layer**, since a section has no description. The layer is a direct child of the section, outside every frame, and locked; the plugin API still writes it.
 
 ### Commands
 
@@ -115,7 +115,7 @@ Screens are drawn for macOS. Each macOS screen frame draws the window's edge tha
 ## Popups
 
 - **A popup is a component with a `State` variant**, in its own section inside its area's section on the Components page. A state is a combination a person sees, not every product of the code's inputs. Light and dark are modes, never variants: below the component set, a row of its instances sets *Kstack Dark* with *Dark*.
-- **A popup that opens from the app bar is drawn open on `Shell`**, a screen component on the Screens page, in the *Popups on Shell* section: `Shell` on the left, then one nested section per popup. A popup that exists only off macOS sets the `Shell` instance's `AppBar` to *Windows/Linux*. A popup's section holds one frame per open state, left to right. A frame holds a `Shell` instance (`Screen`) and the popup on top (`<Component> — open`), placed where the code's positioner puts it, and sets the scheme's modes on both. Name it after the screen: `Shell — Cluster status open — Kstack Light`.
+- **A popup that opens from the app bar is drawn open on `Shell`**, a screen component on the Screens page, in the *Popups on Shell* section: `Shell` on the left, then one nested section per popup. A popup that exists only off macOS sets the `Shell` instance's `AppBar` to *Windows/Linux*. A popup's section holds one row per open state, light then dark. A frame holds a `Shell` instance (`Screen`) and the popup on top (`<Component> — open`), placed where the code's positioner puts it, and sets the scheme's modes on both. Name it after the screen: `Shell — Cluster status open — Kstack Light`.
 - **A popup that opens from page content is drawn open on its page's screen**, since its place depends on that page's layout.
 - **Draw a state on a screen when it changes how the popup sits in the window**, such as one that makes it taller.
 - A popover has no scrim, so none is drawn.
@@ -217,7 +217,8 @@ Never `record` an edited component to clear the report without that answer: reco
 - A variable imported with `importVariableByKeyAsync` lasts only for that call: `getVariableByIdAsync` returns `null` in the next, and binding `null` unbinds silently. Import it in every call that binds it.
 - Run `use_figma` calls one at a time.
 - `createAutoLayout()` and `createComponent()` frames start with a white fill. Light mode hides it; clear it, or dark mode draws white panels.
-- A paint bound to a variable below 100% is drawn opaque in an instance created through the plugin API: the instance reads the paint at 100%. The library's own `Button` (destructive, `bg-destructive/10`) does it too. Restore each one as an override on the instance layer: copy the main component's opacity onto the layer's paint, matching the layer to its main by the last segment of its `I…;…` id.
+- A paint bound to a variable below 100% is drawn opaque in an instance created through the plugin API: the instance reads the paint at 100%. The library's own `Button` (destructive, `bg-destructive/10`) does it too. Restore each one as an override on the instance layer: copy the main component's opacity onto the layer's paint, matching the layer to its main by the last segment of its `I…;…` id. Detaching such an instance keeps the 100%.
+- A gradient stop bound to a variable takes the variable's alpha too, so a `from-<token>` fade cannot be one gradient. Draw it as the token's fill under a gradient mask.
 - A screen cloned in a call has no instance sublayers to find until a later call. Clone in one call, edit in the next.
 - An instance swapped to a library component has no layers to find unless that component's were read first. Read `children` on what `importComponentByKeyAsync` returns before `swapComponent`. A hidden instance has none either way.
 
