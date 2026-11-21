@@ -24,6 +24,8 @@ import (
 
 	"github.com/kstackhq/kstack/sidecar/internal/appdb/appdbtest"
 	"github.com/kstackhq/kstack/sidecar/internal/lib/oskeyring"
+	"github.com/kstackhq/kstack/sidecar/internal/lib/oskeyring/oskeyringtest"
+	"github.com/kstackhq/kstack/sidecar/internal/lib/testutil"
 	"github.com/kstackhq/kstack/sidecar/internal/services/connectors"
 )
 
@@ -76,6 +78,45 @@ func TestAFailedDeleteOfTheOldEntryIsRetried(t *testing.T) {
 	assert.Equal(t, 2, k.deletes)
 }
 
+// The old entry is deleted after the engine's restore, unread, and only from
+// a keyring that opened: a keyring whose opening failed, a dismissed prompt
+// included, is not asked, since the delete would raise the prompt again. A
+// Close before the restore returns and deletes nothing.
+func TestTheOldEntryIsDeletedOnlyFromAKeyringThatOpened(t *testing.T) {
+	t.Parallel()
+	newKeyring := func(t *testing.T) *oskeyringtest.Keyring {
+		k := oskeyringtest.New()
+		require.NoError(t, k.Set("auth-token", "old"))
+		return k
+	}
+	set := oskeyringtest.Call{Kind: oskeyringtest.Set, Account: "auth-token"}
+	probe := oskeyringtest.Call{Kind: oskeyringtest.Get, Account: "keyring-probe"}
+
+	t.Run("the probe answered", func(t *testing.T) {
+		k := newKeyring(t)
+
+		newTestService(t, newFakeEngine(), oskeyring.Gate(k, oskeyring.Pace{}))
+
+		assert.Equal(t, []oskeyringtest.Call{set, probe, {Kind: oskeyringtest.Delete, Account: "auth-token"}}, k.Calls())
+	})
+	t.Run("the probe failed", func(t *testing.T) {
+		k := newKeyring(t)
+		k.FailGets(1, errors.New("dismissed"))
+
+		newTestService(t, newFakeEngine(), oskeyring.Gate(k, oskeyring.Pace{}))
+
+		assert.Equal(t, []oskeyringtest.Call{set, probe}, k.Calls())
+	})
+	t.Run("the engine's restore held", func(t *testing.T) {
+		k := newKeyring(t)
+		s := startTestService(t, newRestoringEngine(), oskeyring.Gate(k, oskeyring.Pace{}))
+
+		testutil.WaitReturn(t, s.Close, "Close")
+
+		assert.Equal(t, []oskeyringtest.Call{set}, k.Calls())
+	})
+}
+
 // An engine that cannot be built is New's error.
 func TestNewAnswersTheEnginesError(t *testing.T) {
 	t.Parallel()
@@ -90,9 +131,10 @@ func TestNewAnswersTheEnginesError(t *testing.T) {
 // reaches no network.
 func TestNewIsSignedOutWithNoSession(t *testing.T) {
 	t.Parallel()
-	s, err := New(Config{DB: appdbtest.Open(t), KeychainService: "kstack-test-kstack", Issuer: "https://issuer.test", ClientID: "kstack-desktop"})
+	s, err := New(Config{DB: appdbtest.Open(t), Keyring: oskeyringtest.New(), Issuer: "https://issuer.test", ClientID: "kstack-desktop"})
 	require.NoError(t, err)
 	t.Cleanup(s.Close)
+	testutil.Wait(t, s.Restored(), "the restore")
 
 	assert.Equal(t, connectors.SignedOut, s.State().Phase)
 }

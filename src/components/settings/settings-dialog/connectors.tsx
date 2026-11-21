@@ -47,7 +47,7 @@ import { type ProviderCredentialState, useProviderCredentials } from '@/lib/prov
 import { storageKey } from '@/lib/storage-key';
 
 import { Intro } from './group';
-import { keyFailureText } from './providers';
+import { CHECKING_KEYCHAIN, keyFailureText } from './providers';
 
 export function ConnectorsSettings() {
   const { connectors, loaded } = useConnectors();
@@ -230,6 +230,7 @@ function ChatGPTRow({
     actions.connect(fresh);
   };
   let detail = connector.detail;
+  if (connection.phase === 'Restoring') detail = CHECKING_KEYCHAIN;
   if (connection.phase === 'SigningIn') detail = 'Waiting for your browser…';
   if (connection.phase === 'Failed' && connection.failure) detail = failureText[connection.failure](connector.name);
   return (
@@ -246,7 +247,8 @@ function ChatGPTRow({
             Continue with ChatGPT
           </Button>
         )}
-        {(connection.phase === 'Connected' || (connection.registered && connection.phase !== 'SigningIn')) && (
+        {(connection.phase === 'Connected' ||
+          (connection.registered && connection.phase !== 'SigningIn' && connection.phase !== 'Restoring')) && (
           <ChatGPTMenu connected={connection.phase === 'Connected'} actions={actions} onFresh={() => connect(true)} />
         )}
       </div>
@@ -310,7 +312,10 @@ function openRouterDetail(
   credential: ProviderCredentialState | undefined,
 ): ReactNode {
   switch (phase) {
+    case 'Restoring':
+      return CHECKING_KEYCHAIN;
     case 'SignedOut': {
+      if (credential?.source === 'Restoring') return CHECKING_KEYCHAIN;
       const failed = credential && keyFailureText(credential);
       if (failed) return failed;
       if (credential?.source === 'SavedKey') return 'Using a saved key';
@@ -362,6 +367,8 @@ function OpenRouterRow({
 
 function gitHubDetail({ phase, userCode, failure }: GitHubConnection, { name, detail }: Connector): ReactNode {
   switch (phase) {
+    case 'Restoring':
+      return CHECKING_KEYCHAIN;
     case 'SignedOut':
     case 'Connected':
       return detail;
@@ -512,6 +519,8 @@ function awsDetail({ phase, failure }: AWSConnection, { name, detail }: Connecto
       return 'Waiting for the browser…';
     case 'Failed':
       return failure ? failureText[failure](name) : detail;
+    case 'Restoring':
+      return CHECKING_KEYCHAIN;
     case 'SignedOut':
     case 'Connected':
       return detail;
@@ -606,6 +615,8 @@ function googleDetail({ phase, project, failure }: GoogleConnection, { name, det
     case 'Failed':
       if (failure === 'ScopeNotGranted') return 'The sign-in did not allow access to Google Cloud.';
       return failure ? failureText[failure](name) : detail;
+    case 'Restoring':
+      return CHECKING_KEYCHAIN;
     case 'SignedOut':
       return detail;
   }

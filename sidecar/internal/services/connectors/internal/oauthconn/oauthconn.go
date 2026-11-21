@@ -57,8 +57,8 @@ type Config struct {
 	Provider Provider
 	// DB is app.db, which holds the registration.
 	DB *appdb.DB
-	// KeychainService is the OS-keyring service the refresh token is kept under.
-	KeychainService string
+	// Keyring is the OS keyring the refresh token is kept in.
+	Keyring oskeyring.Keyring
 }
 
 // Service is one provider's connection. Every change to the session happens under
@@ -83,14 +83,18 @@ type Service struct {
 	tx  *watch.Sender[connectors.State]
 	// sessions holds the generation while Connected, 0 otherwise.
 	sessions *watch.Hub[uint64]
+	// restored closes once the restore has published.
+	restored chan struct{}
 
-	mu         sync.Mutex
-	gen        uint64
-	state      connectors.State
-	session    *session
-	attempt    *attempt
-	refreshing *refresh
-	endpoints  *oauth.Endpoints
+	mu      sync.Mutex
+	gen     uint64
+	state   connectors.State
+	session *session
+	// restoredGen is the generation the restore published, 0 for none.
+	restoredGen uint64
+	attempt     *attempt
+	refreshing  *refresh
+	endpoints   *oauth.Endpoints
 	// consent asks the next authorize for consent again: the last one did not
 	// grant the required scope.
 	consent bool
@@ -98,8 +102,6 @@ type Service struct {
 
 // option is an unexported build seam, so only in-package tests pass one.
 type option func(*Service)
-
-func withKeyring(k oskeyring.Keyring) option { return func(s *Service) { s.keyring = k } }
 
 func withBrowser(open func(string) error) option { return func(s *Service) { s.open = open } }
 
@@ -110,8 +112,9 @@ func withRegistrationWriter(wrap func(registrationWriter) registrationWriter) op
 	return func(s *Service) { s.reg.write = wrap(s.reg.write) }
 }
 
-// New builds the service over its stores and restores a stored session. It
-// reaches no network: endpoints are discovered at the first sign-in or refresh.
+// New builds the service over its stores, Restoring, and restores a stored
+// session on a goroutine. It reaches no network and makes no keyring call:
+// endpoints are discovered at the first sign-in or refresh.
 func New(cfg Config) (*Service, error) {
 	return newWithOptions(cfg)
 }
@@ -130,7 +133,7 @@ func newWithOptions(cfg Config, opts ...option) (*Service, error) {
 	s := &Service{
 		p:              cfg.Provider,
 		base:           base,
-		keyring:        oskeyring.New(cfg.KeychainService),
+		keyring:        cfg.Keyring,
 		reg:            reg,
 		open:           browser.Open,
 		attemptTimeout: attemptTimeout,
@@ -138,54 +141,26 @@ func newWithOptions(cfg Config, opts ...option) (*Service, error) {
 		stop:           stop,
 		hub:            watch.New(connectors.State{}),
 		sessions:       watch.New[uint64](0),
+		restored:       make(chan struct{}),
 		endpoints:      cfg.Provider.Endpoints,
 	}
 	s.tx = s.hub.Sender()
 	for _, opt := range opts {
 		opt(s)
 	}
-	if readErr != nil {
-		// The entry is left for a launch that can read the row, unless a Connect
-		// rewrites the row first, which ends that session.
-		slog.Warn("oauth: could not read the registration; treating as signed out", "provider", s.p.ID, "err", readErr)
-		s.publishLocked(connectors.State{Phase: connectors.SignedOut})
-		return s, nil
-	}
-	s.publishLocked(s.restore())
+	s.publishLocked(connectors.State{Phase: connectors.Restoring})
+	s.wg.Go(func() { s.restore(readErr) })
 	return s, nil
 }
 
-// restore reads both stores. A session exists only when the row and the
-// keyring's entry name the same sign-in. Anything else is a sign-in or a
-// sign-out that a crash, a lost commit or a failed delete left half done, or a
-// store restored from a backup: the row is signed out and the entry deleted.
-func (s *Service) restore() connectors.State {
-	reg := s.reg.get()
-	e, found, err := loadEntry(s.keyring, s.refreshAccount())
-	if err != nil {
-		// A locked keyring is no proof of a sign-out: write nothing.
-		slog.Warn("oauth: could not read the keyring; treating as signed out", "provider", s.p.ID, "err", err)
-		return connectors.State{Phase: connectors.SignedOut}
-	}
-	clientID := s.clientID(reg)
-	if reg.SessionID != "" && e.Session == reg.SessionID && clientID != "" && e.Token != "" {
-		safe.AddSecret(e.Token)
-		s.gen++
-		s.session = &session{id: reg.SessionID, clientID: clientID, refresh: e.Token}
-		return connectors.State{Phase: connectors.Connected, Subject: reg.Subject, Email: reg.Email, Name: reg.Name}
-	}
-	if reg.SessionID != "" {
-		reg.SessionID = ""
-		if err := s.reg.save(reg); err != nil {
-			slog.Warn("oauth: could not record the sign-out", "provider", s.p.ID, "err", err)
-		}
-	}
-	if found {
-		if err := s.keyring.Delete(s.refreshAccount()); err != nil {
-			slog.Warn("oauth: could not delete a stale keyring entry", "provider", s.p.ID, "err", err)
-		}
-	}
-	return connectors.State{Phase: connectors.SignedOut}
+// Restored closes once the restore has published what the stores held.
+func (s *Service) Restored() <-chan struct{} { return s.restored }
+
+// RestoredSession is the generation the restore published, 0 for none.
+func (s *Service) RestoredSession() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.restoredGen
 }
 
 // State is the connector's current state.

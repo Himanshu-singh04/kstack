@@ -120,7 +120,7 @@ func TestDeleteReachesAnEntryUnreadAtLaunch(t *testing.T) {
 	t.Parallel()
 	k := oskeyringtest.New()
 	require.NoError(t, k.Set(account(twinID), encode("unread-key-0123456789abcdef")))
-	k.FailGet = errors.New("locked")
+	k.FailGet(account(twinID), errors.New("locked"))
 	s := newService(t, Config{Keyring: k})
 	require.False(t, state(t, s, twinID).HasSavedKey)
 
@@ -190,4 +190,21 @@ func TestASaveClearsAFailedDelete(t *testing.T) {
 	require.ErrorIs(t, s.Delete(twinID), ErrNotDeleted)
 	require.NoError(t, s.Save(twinID, otherKey))
 	assert.Empty(t, state(t, s, twinID).Failure)
+}
+
+// While Restoring, Save and Delete are refused, and neither reaches the
+// keyring.
+func TestAChangeIsRefusedWhileRestoring(t *testing.T) {
+	t.Parallel()
+	k := oskeyringtest.New()
+	release := k.Hold(oskeyringtest.Get)
+	t.Cleanup(release)
+	s := startService(t, Config{Keyring: k})
+
+	assert.ErrorIs(t, s.Save(twinID, savedKey), ErrRestoring)
+	assert.ErrorIs(t, s.Delete(twinID), ErrRestoring)
+
+	for _, c := range k.Calls() {
+		assert.Equal(t, oskeyringtest.Get, c.Kind, "no write before the read answered")
+	}
 }

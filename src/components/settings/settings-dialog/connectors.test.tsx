@@ -184,6 +184,19 @@ describe('the ChatGPT row', () => {
     expect(within(row()).queryByRole('button', { name: 'Actions for ChatGPT' })).toBeNull();
   });
 
+  it('checks the keychain with no action while restoring, then draws its usual row', () => {
+    state.connectors = [chatgpt({ phase: 'Restoring', registered: true })];
+    const { rerender } = render(<ConnectorsSettings />);
+
+    expect(row()).toHaveTextContent('Checking your keychain…');
+    expect(within(row()).queryByRole('button')).toBeNull();
+
+    state.connectors = [chatgpt({ phase: 'SignedOut' })];
+    rerender(<ConnectorsSettings />);
+    expect(row()).toHaveTextContent('OpenAI models on your ChatGPT plan');
+    expect(within(row()).getByRole('button', { name: 'Continue with ChatGPT' })).toBeEnabled();
+  });
+
   it('waits for the browser while signing in, and cancels on a press', async () => {
     state.connectors = [chatgpt({ phase: 'SigningIn', registered: true })];
     render(<ConnectorsSettings />);
@@ -417,6 +430,19 @@ describe('the OpenRouter row', () => {
     expect(within(row()).getByRole('button', { name: 'Connect' })).toBeEnabled();
   });
 
+  it('checks the keychain with no action while restoring, then draws its usual row', () => {
+    state.connectors = [openRouter({ phase: 'Restoring' })];
+    const { rerender } = render(<ConnectorsSettings />);
+
+    expect(row()).toHaveTextContent('Checking your keychain…');
+    expect(within(row()).queryByRole('button')).toBeNull();
+
+    state.connectors = [openRouter({ phase: 'SignedOut' })];
+    rerender(<ConnectorsSettings />);
+    expect(row()).toHaveTextContent('Many providers on one account');
+    expect(within(row()).getByRole('button', { name: 'Connect' })).toBeEnabled();
+  });
+
   it('waits for the browser while signing in, and cancels on a press', async () => {
     state.connectors = [openRouter({ phase: 'SigningIn' })];
     render(<ConnectorsSettings />);
@@ -515,6 +541,15 @@ describe('the OpenRouter row', () => {
     expect(row()).toHaveTextContent(text);
   });
 
+  it('checks the keychain while signed out and its provider is restoring, and offers Connect', () => {
+    state.openRouterSource = 'Restoring';
+    state.connectors = [openRouter({ phase: 'SignedOut' })];
+    render(<ConnectorsSettings />);
+
+    expect(row()).toHaveTextContent('Checking your keychain…');
+    expect(within(row()).getByRole('button', { name: 'Connect' })).toBeEnabled();
+  });
+
   it('draws nothing before the credentials load, so the detail never flips', () => {
     state.keysLoaded = false;
     state.openRouterSource = 'SavedKey';
@@ -585,6 +620,19 @@ describe('the AWS row', () => {
     await userEvent.setup().click(within(row()).getByRole('button', { name: 'Connect' }));
     expect(actions.connect).toHaveBeenCalledOnce();
     expect(menuButton()).toBeNull();
+  });
+
+  it('checks the keychain with no action while restoring, then draws its usual row', () => {
+    state.connectors = [aws({ phase: 'Restoring' })];
+    const { rerender } = render(<ConnectorsSettings />);
+
+    expect(row()).toHaveTextContent('Checking your keychain…');
+    expect(within(row()).queryByRole('button')).toBeNull();
+
+    state.connectors = [aws({ phase: 'SignedOut' })];
+    rerender(<ConnectorsSettings />);
+    expect(row()).toHaveTextContent('Cloud resources and Bedrock models');
+    expect(within(row()).getByRole('button', { name: 'Connect' })).toBeEnabled();
   });
 
   it('waits for the browser while signing in, and cancels on a press', async () => {
@@ -707,6 +755,19 @@ describe('the GitHub row', () => {
     expect(menuButton()).toBeNull();
     await userEvent.setup().click(within(row()).getByRole('button', { name: 'Connect' }));
     expect(actions.connect).toHaveBeenCalledOnce();
+  });
+
+  it('checks the keychain with no action while restoring, then draws its usual row', () => {
+    state.connectors = [gitHub({ phase: 'Restoring' })];
+    const { rerender } = render(<ConnectorsSettings />);
+
+    expect(row()).toHaveTextContent('Checking your keychain…');
+    expect(within(row()).queryByRole('button')).toBeNull();
+
+    state.connectors = [gitHub({ phase: 'SignedOut' })];
+    rerender(<ConnectorsSettings />);
+    expect(row()).toHaveTextContent('Repositories for git and gh in the sandbox');
+    expect(within(row()).getByRole('button', { name: 'Connect' })).toBeEnabled();
   });
 
   it('offers Connect after a failure with no reason, and draws the offer', () => {
@@ -861,6 +922,19 @@ describe('the Google row', () => {
     await userEvent.setup().click(within(row()).getByRole('button', { name: 'Connect' }));
     expect(actions.connect).toHaveBeenCalledWith(false);
     expect(menuButton()).toBeNull();
+  });
+
+  it('checks the keychain with no action while restoring, then draws its usual row', () => {
+    state.connectors = [google({ phase: 'Restoring' })];
+    const { rerender } = render(<ConnectorsSettings />);
+
+    expect(row()).toHaveTextContent('Checking your keychain…');
+    expect(within(row()).queryByRole('button')).toBeNull();
+
+    state.connectors = [google({ phase: 'SignedOut' })];
+    rerender(<ConnectorsSettings />);
+    expect(row()).toHaveTextContent(offer);
+    expect(within(row()).getByRole('button', { name: 'Connect' })).toBeEnabled();
   });
 
   it('waits for the browser while signing in, and cancels on a press', async () => {

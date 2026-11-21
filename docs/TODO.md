@@ -124,7 +124,7 @@ Pending work across the three parts of the app. Grouped by area; detailed items 
 - **One measurement per cache for the stats gauge, not one per subscriber.** `cachesAPI.WatchStats` builds its whole loop inside `NewStream`'s pump (`services/cluster/caches.go:347`, `stream.go:180`), so every subscriber gets its own: three windows on one cache means three 5-second tickers, three file measurements, and three sets of row-count queries against the same file. The counts are the expensive half — the file measurement is three `os.Stat` calls, the counts are SQL. Nothing is wrong with the answers; the work is just done N times. **Shape:** one measurement stream per cache, multicast to its subscribers, the way the delta watches already fan out — the pump moves off the subscription and onto the cache, and a subscriber joins the running one and gets the current value on arrival (the gauge is current-on-subscribe, so a joiner must not wait for the next tick). `WatchHealth` has the same per-subscriber shape over the records, so whatever carries the multicast should be able to serve both. **Not blocked on anything**, and independent of the cache size ceiling: the janitor's own measurement is a different caller with a different lifetime, and is not what this de-dupes.
 
 - **A proactive refresh for the Kstack Cloud connector.** The engine refreshes an access token only when `Sign` needs one (`services/connectors/internal/oauthconn/sign.go`), and nothing signs with the Kstack session, so it is never refreshed: the app can show an account whose refresh token the issuer has already expired. What remains: a refresh before expiry, or a check at launch.
-- **Stop deleting the old `auth-token` keyring entry.** `kstackcloud.New` deletes it at every launch (`services/connectors/kstackcloud`). Remove the delete, its tests and its `docs/persisted-data.md` row once no supported build wrote that entry (`desktop/v0.0.1` and earlier).
+- **Stop deleting the old `auth-token` keyring entry.** A goroutine of `kstackcloud`'s deletes it at every launch, once the engine has restored (`services/connectors/kstackcloud`). Remove the delete, its tests and its `docs/persisted-data.md` row once no supported build wrote that entry (`desktop/v0.0.1` and earlier).
 - **Run the ChatGPT connector's probe on a real account.** The connector is built on answers nobody has checked; each needs a ChatGPT plan and OpenAI's [devkit](https://github.com/openai/sign-in-with-chatgpt-devkit) for a token. (1) A whole tool round works with plain function tools in top-level `tools`, on a model the `openai` row lacks and on one it has; if not, the row wraps them in a namespace. (2) `reasoning.summary: auto` and `include: reasoning.encrypted_content` are taken; a refused one moves from the row's `Extra` to its `Omit`. (3) What `GET /v1/models` returns beyond `slug`, `display_name` and `visibility`, saved as the decoder's fixture. (4) Which listed ids the `openai` row also has. (5) The refresh token, in its `{"v","token","session"}` entry, fits Windows Credential Manager's 2,560 bytes. (6) A refresh straight after sign-in is allowed. (7) What a `client_id` the user deleted in ChatGPT's settings answers, at the token endpoint and on the authorize page.
 - **Run the Kstack Cloud connector's live checks against `oauth.kstack.sh`.** The connector is built on these assumptions: the discovery document's `issuer` is `https://oauth.kstack.sh` to the byte (no trailing slash), it names a `revocation_endpoint`, and every endpoint is on the issuer's origin; the ID token echoes the authorize request's `nonce`; and the token endpoint answers a revoked or expired refresh token `invalid_grant`. A wrong issuer, a missing endpoint or an unechoed nonce fails every sign-in: the issuer's default is in `sidecar/config.go` and the host's `OAUTH_ISSUER` (`src-tauri/src/services/sidecar/service.rs`), the session-ending code is the provider's `SessionEnders` (`services/connectors/kstackcloud`). Then, by hand once: sign in from the avatar and from the tray, quit, relaunch offline, and the account shows with its name.
 - **Run the AWS connector's live checks on a real account.** The connector follows the AWS CLI's `aws login` and the SDK's model of `signin`'s `CreateOAuth2Token`; these are assumed: AWS accepts the authorize request Kstack builds (`scope=openid`, `code_challenge_method=SHA-256`, a loopback `redirect_uri` on `/oauth/callback` at a random port), a decline redirects with `access_denied`, the ID token's `sub` is the principal's ARN for an IAM user, a role session and root, and an expired or reused refresh token answers `AccessDeniedException` or `InvalidGrantException`. An answer that differs changes `services/connectors/aws`. Then, by hand once: Connect, quit, relaunch, refresh past fifteen minutes, and Disconnect. Once they pass, the AWS connector's row in `security-model.md` is **Enforced**.
@@ -137,6 +137,29 @@ Pending work across the three parts of the app. Grouped by area; detailed items 
 - **Check RBAC permissions?** The `ClusterPermissions`/`ResourceRule`/`NonResourceRule` types and schema exist, but the `Permissions` resolver is a stub that returns `not implemented: permissions`. Implement it via a `SelfSubjectRulesReview`. Distinct from the `SelfSubjectReview` *authentication* probe behind `ClusterPrincipal.username`, which is implemented.
 
 ## Sidecar (Go)
+
+- **Run the keyring's manual checks.** `oskeyring`'s gate and the background restore are tested
+  over fakes alone. By hand, with a throwaway program over `oskeyring.New`, recording what differs
+  from the code in the pull request that corrects it:
+  - Linux, the Secret Service stopped, then its unit masked so auto-start fails: the probe's error,
+    its Go type and its D-Bus name, which `unavailable_linux.go` must match as `ErrUnavailable`.
+  - Linux, no session bus: the probe fails at once and is not retried.
+  - Linux, the login keyring locked: the probe raises one prompt; unlocked, it answers
+    `ErrNoEntry`; dismissed, an error that is not `ErrUnavailable`.
+  - macOS, the login keychain locked (`security lock-keychain`): whether the probe, a lookup of an
+    item that is not there, raises the unlock dialog, and whether the reads that follow share one
+    dialog. **If they raise several, the one-prompt promise does not hold on macOS:** serialize the
+    restores' reads behind the gate, and say so in the ADR that follows
+    [a launch restores keyring credentials in the background](adr/2026-11-20-a-launch-restores-keyring-credentials-in-the-background.md).
+  - The app, on Linux with the login keyring locked, for a keyed provider no connector signs with
+    a saved key and its environment key both: the window opens with the prompt up and every
+    connector row and gauged provider row *checking*; a turn to that provider waits; unlocked, the
+    rows settle, the provider on *Using a saved key*, and the turn runs. Dismissed instead: one
+    prompt, every connector signed out, the provider on its environment key, the turn under it.
+- **Read the keyring again after a restore found it unreadable.** A dismissed prompt or an
+  unreadable keyring fails `oskeyring`'s gate for the process: every service settles signed out,
+  and `kstackcloud` leaves `auth-token` until a later launch. Wanted: a way to ask again (a
+  *Try again* in Settings, or a retry on the next sign-in), which gives the gate a new opening.
 
 - **Kstack has no app-level data migration.** Each format migrates itself when it opens, and a
   SQL migration changes tables only, so nothing can move, rename or remove a path under `<data>` or
@@ -573,6 +596,16 @@ Pending work across the three parts of the app. Grouped by area; detailed items 
   options, and whether the API is settled enough to publish before steps 4C and 4D change it.
 
 ## Host (Tauri/Rust)
+
+- **The tray's account section draws a restoring account as signed out.** The section is hidden
+  (`SHOW_ACCOUNT_SECTION` in `src-tauri/src/tray/mod.rs`). `account_snapshot_from`
+  (`tray/account_menu.rs`) reads `authenticated` alone, so until the launch has read the keyring
+  the section would offer *Sign in / Sign up*, and the sidecar refuses a sign-in while
+  `restoring`. **Fix, before showing the section:** carry `AuthState.restoring` into
+  `AccountSnapshot`, give `AccountMenuDescriptor` a `Restoring` that `build_account_descriptor`
+  answers before `authenticated`, and draw it as one disabled item, *Checking your keychain…*.
+  Test the descriptor and the drawn item (text, disabled) beside `mod.rs`'s
+  `signed_out_the_section_offers_sign_in`.
 
 - **The log level can only be set by an environment variable.** The host reads `KSTACK_LOG_LEVEL` in
   `env_filter` (`src-tauri/src/logging.rs`). The sidecar reads the same variable in `main.go`, and
