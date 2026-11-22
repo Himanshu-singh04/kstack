@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `<state>/window-state.json`: the main window's last frame, restored on the
-//! next launch. Disposable: a missing, corrupt or differently stamped file
-//! reads as no saved frame, and the next write replaces it.
+//! `<state>/window-state.json`: the main and log windows' last frames. A missing,
+//! corrupt or unknown-version file reads as no saved frames.
 
 use std::path::{Path, PathBuf};
 
@@ -23,12 +22,12 @@ use serde::{Deserialize, Serialize};
 use crate::paths::Folders;
 
 /// Stamped into the file on every write; a file with another stamp is ignored.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Also deleted by `make clean` (`scripts/clean-dev-data.go`).
 const FILE_NAME: &str = "window-state.json";
 
-/// Where the main window's frame is kept across launches: in the state
+/// Where window frames are kept across launches: in the state
 /// directory, so a dev build keeps its own and `make clean-data` resets it.
 pub fn path(folders: &Folders) -> PathBuf {
     folders.state.join(FILE_NAME)
@@ -59,22 +58,41 @@ pub struct SavedFrame {
 struct WindowStateFile {
     schema_version: u32,
     main: Option<SavedFrame>,
+    #[serde(default)]
+    logs: Option<Frame>,
 }
 
-/// The saved frame at `path`. `None` when there is none, the file does not
-/// parse, or it carries another schema version.
-pub fn read(path: &Path) -> Option<SavedFrame> {
+fn read_file(path: &Path) -> Option<WindowStateFile> {
     let contents = std::fs::read_to_string(path).ok()?;
     let file: WindowStateFile = serde_json::from_str(&contents).ok()?;
-    if file.schema_version != SCHEMA_VERSION {
-        return None;
-    }
-    file.main
+    (file.schema_version == 1 || file.schema_version == SCHEMA_VERSION).then_some(file)
 }
 
-/// Writes `saved` to `path` atomically (temp + rename), creating the parent
-/// dir on first run.
+/// The saved main frame, including from a version 1 file.
+pub fn read(path: &Path) -> Option<SavedFrame> {
+    read_file(path)?.main
+}
+
+/// The saved log-window frame, when this file has one.
+pub fn read_logs(path: &Path) -> Option<Frame> {
+    let file = read_file(path)?;
+    (file.schema_version == SCHEMA_VERSION)
+        .then_some(file.logs)
+        .flatten()
+}
+
+/// Writes the main frame, retaining the log frame in the same file.
 pub fn write(path: &Path, saved: &SavedFrame) -> std::io::Result<()> {
+    write_file(path, Some(*saved), read_logs(path))
+}
+
+/// Writes the log frame, retaining the main frame in the same file.
+pub fn write_logs(path: &Path, frame: &Frame) -> std::io::Result<()> {
+    write_file(path, read(path), Some(*frame))
+}
+
+/// Replaces both frames atomically (temp + rename), creating the parent dir.
+fn write_file(path: &Path, main: Option<SavedFrame>, logs: Option<Frame>) -> std::io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("window state path has no parent directory"))?;
@@ -82,7 +100,8 @@ pub fn write(path: &Path, saved: &SavedFrame) -> std::io::Result<()> {
 
     let file = WindowStateFile {
         schema_version: SCHEMA_VERSION,
-        main: Some(*saved),
+        main,
+        logs,
     };
     let contents = serde_json::to_string_pretty(&file).map_err(std::io::Error::other)?;
 
@@ -158,11 +177,12 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "main": {
                     "x": 100.0, "y": 50.0, "width": 1200.0, "height": 760.0,
                     "maximized": false,
                 },
+                "logs": null,
             })
         );
     }
@@ -179,7 +199,7 @@ mod tests {
         write(&path, &saved(FRAME, false)).unwrap();
         let other_version = std::fs::read_to_string(&path)
             .unwrap()
-            .replace(r#""schemaVersion": 1"#, r#""schemaVersion": 2"#);
+            .replace(r#""schemaVersion": 2"#, r#""schemaVersion": 3"#);
         std::fs::write(&path, other_version).unwrap();
         assert_eq!(read(&path), None, "another version");
     }
@@ -199,5 +219,41 @@ mod tests {
     #[test]
     fn a_window_maximized_with_nothing_known_remembers_its_frame() {
         assert_eq!(next_saved(None, saved(FRAME, true)), saved(FRAME, true));
+    }
+
+    #[test]
+    fn both_frames_survive_writes_in_either_order() {
+        let scratch = Scratch::new();
+        let path = scratch.path().join("window-state.json");
+        write_logs(&path, &FRAME).unwrap();
+        assert_eq!(read_logs(&path), Some(FRAME));
+        assert_eq!(read(&path), None);
+
+        write(&path, &saved(SCREEN, true)).unwrap();
+        assert_eq!(read_logs(&path), Some(FRAME));
+        assert_eq!(read(&path), Some(saved(SCREEN, true)));
+
+        write_logs(&path, &SCREEN).unwrap();
+        assert_eq!(read(&path), Some(saved(SCREEN, true)));
+        assert_eq!(read_logs(&path), Some(SCREEN));
+    }
+
+    #[test]
+    fn a_version_one_main_frame_survives_the_log_frame_upgrade() {
+        let scratch = Scratch::new();
+        let path = scratch.path().join("window-state.json");
+        std::fs::write(&path, r#"{"schemaVersion":1,"main":{"x":100,"y":50,"width":1200,"height":760,"maximized":false}}"#).unwrap();
+        assert_eq!(read(&path), Some(saved(FRAME, false)));
+        assert_eq!(read_logs(&path), None);
+        write_logs(&path, &SCREEN).unwrap();
+        assert_eq!(read(&path), Some(saved(FRAME, false)));
+        assert_eq!(read_logs(&path), Some(SCREEN));
+
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"main":null,"logs":{"x":0,"y":0,"width":900,"height":600}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_logs(&path), None, "version 1 had no log frame");
     }
 }

@@ -17,7 +17,8 @@
 //! `build_window`; new windows are sized to their monitor ([`fit_size`]) and
 //! cascade down-right of their anchor ([`cascade_position`]), an app window
 //! at its anchor's size, and the main
-//! window reopens at its saved frame (`window_state.rs`). See
+//! window reopens at its saved frame, and log windows share a saved frame
+//! (`window_state.rs`). See
 //! docs/adr/2026-08-09-per-platform-window-chrome.md.
 //!
 //! Windows are visible from creation, painted with the resolved scheme at t0
@@ -94,7 +95,7 @@ const MAX_WORK_AREA_SHARE: f64 = 0.85;
 /// A log window's page asks the host what to draw, so its URL carries nothing.
 const LOG_WINDOW: WindowSpec = WindowSpec {
     path: "logs",
-    size: (1000.0, 700.0),
+    size: (960.0, 640.0),
     takes_anchor_size: false,
     bar_height: LOG_BAR_HEIGHT,
 };
@@ -412,7 +413,13 @@ pub struct WindowManager {
     /// window is built. Never held while the runtime is queried.
     main_frame: Mutex<Option<SavedFrame>>,
 
-    /// Where the main window's frame is kept across launches
+    /// One frame shared by log windows, seeded from disk on first use.
+    logs_frame: Mutex<Option<Frame>>,
+
+    /// Serializes read-merge-write of the two frames into one file.
+    save_lock: Mutex<()>,
+
+    /// Where the main and log window frames are kept across launches
     /// ([`window_state::path`]). `None` keeps it for this session only.
     state_path: Option<PathBuf>,
 }
@@ -429,6 +436,8 @@ impl WindowManager {
             shutdown,
             monitors: Box::new(monitors),
             main_frame: Mutex::new(None),
+            logs_frame: Mutex::new(None),
+            save_lock: Mutex::new(()),
             state_path,
         }
     }
@@ -449,7 +458,8 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Builds the log window `label`, placed off its app window `anchor`.
+    /// Builds the log window `label`, cascading after the newest open log
+    /// window, or restoring the last log position when none is open.
     /// `None` when a quit has begun and it built nothing.
     pub fn open_log_window<R: Runtime>(
         &self,
@@ -457,8 +467,60 @@ impl WindowManager {
         label: &str,
         anchor: &str,
     ) -> Result<Option<WebviewWindow<R>>> {
-        let frame = self.placement(app, Some(anchor), &LOG_WINDOW);
-        self.open(app, label, &LOG_WINDOW, frame)
+        let frame = self.log_window_placement(app, anchor);
+        let size = frame
+            .or_else(|| self.saved_logs_frame())
+            .map_or(LOG_WINDOW.size, |frame| (frame.width, frame.height));
+        let spec = WindowSpec { size, ..LOG_WINDOW };
+        let built = self.open(app, label, &spec, frame)?;
+        if built.is_some() {
+            if let Some(frame) = frame {
+                *self.logs_frame.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame);
+            }
+        }
+        Ok(built)
+    }
+
+    fn log_window_placement<R: Runtime>(&self, app: &AppHandle<R>, anchor: &str) -> Option<Frame> {
+        let saved = self.saved_logs_frame();
+        let size = saved.map_or(LOG_WINDOW.size, |frame| (frame.width, frame.height));
+        let spec = WindowSpec { size, ..LOG_WINDOW };
+
+        // Labels use the same monotonic counter as app windows, so the highest
+        // live log label is the most recently opened one even after an app opens.
+        let latest = app
+            .webview_windows()
+            .into_values()
+            .filter(|window| is_logs_label(window.label()))
+            .max_by_key(|window| {
+                window.label()[LOGS_PREFIX.len()..]
+                    .parse::<u64>()
+                    .unwrap_or(0)
+            });
+        if let Some(window) = latest {
+            return self.placement(app, Some(window.label()), &spec);
+        }
+
+        if let Some(saved) = saved {
+            for monitor in self.monitors.all() {
+                let area = logical_work_area(&monitor);
+                let (width, height) = fit_size(size, area);
+                let restored = Frame {
+                    width,
+                    height,
+                    ..saved
+                };
+                if fits(&restored, area) {
+                    return Some(restored);
+                }
+            }
+        }
+        self.placement(app, Some(anchor), &spec)
+    }
+
+    fn saved_logs_frame(&self) -> Option<Frame> {
+        let remembered = *self.logs_frame.lock().unwrap_or_else(|p| p.into_inner());
+        remembered.or_else(|| window_state::read_logs(self.state_path.as_deref()?))
     }
 
     /// Builds the window `label` unless a quit has begun.
@@ -654,6 +716,46 @@ impl WindowManager {
         }
     }
 
+    /// Remembers a log window's normal frame without querying the runtime under a lock.
+    pub fn log_window_moved<R: Runtime>(&self, app: &AppHandle<R>, label: &str) {
+        if !is_logs_label(label) {
+            return;
+        }
+        let observed = app
+            .get_webview_window(label)
+            .and_then(|window| current_frame(&window).map(|frame| (window, frame)));
+        if let Some((window, frame)) = observed {
+            let covered = self
+                .monitors
+                .of_window(label)
+                .is_some_and(|monitor| covers(&frame, logical_work_area(&monitor)));
+            self.remember_log_frame(frame, covered || window.is_maximized().unwrap_or(false));
+        }
+    }
+
+    fn remember_log_frame(&self, frame: Frame, maximized: bool) {
+        if frame.width > 0.0 && frame.height > 0.0 && !maximized {
+            *self.logs_frame.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame);
+        }
+    }
+
+    pub fn log_window_destroyed(&self, label: &str) {
+        if is_logs_label(label) {
+            self.save_logs_frame();
+        }
+    }
+
+    pub fn save_logs_frame(&self) {
+        let _lock = self.save_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let saved = *self.logs_frame.lock().unwrap_or_else(|p| p.into_inner());
+        let (Some(saved), Some(path)) = (saved, &self.state_path) else {
+            return;
+        };
+        if let Err(err) = window_state::write_logs(path, &saved) {
+            warn!(%err, "failed to save the log window's frame");
+        }
+    }
+
     /// Saves the main window's frame once it is destroyed; other windows are
     /// ignored.
     pub fn main_window_destroyed(&self, label: &str) {
@@ -665,6 +767,7 @@ impl WindowManager {
     /// Writes the main window's remembered frame to `state_path`, when there
     /// are both. Failures are logged.
     pub fn save_main_frame(&self) {
+        let _lock = self.save_lock.lock().unwrap_or_else(|p| p.into_inner());
         let saved = *self.main_frame.lock().unwrap_or_else(|p| p.into_inner());
         let (Some(saved), Some(path)) = (saved, &self.state_path) else {
             return;
@@ -1136,7 +1239,7 @@ mod tests {
 
         assert_eq!(
             wm.placement(app.handle(), Some("main"), &super::LOG_WINDOW),
-            Some(frame(28.0, 28.0, 1000.0, 700.0))
+            Some(frame(28.0, 28.0, 960.0, 640.0))
         );
         assert_eq!(
             wm.placement(app.handle(), Some("logs-1"), &APP_WINDOW),
@@ -1156,7 +1259,149 @@ mod tests {
 
         let placed = wm.placement(app.handle(), None, &super::LOG_WINDOW);
 
-        assert_eq!(placed, Some(frame(460.0, 190.0, 1000.0, 700.0)));
+        assert_eq!(placed, Some(frame(480.0, 220.0, 960.0, 640.0)));
+    }
+
+    #[test]
+    fn a_log_window_uses_the_saved_size_and_last_position_when_alone() {
+        let scratch = Scratch::new();
+        let (app, wm) = on_one_monitor(&scratch);
+        window(&app, "main");
+        let last = frame(70.0, 80.0, 1100.0, 750.0);
+        window_state::write_logs(&state_path(&scratch), &last).unwrap();
+
+        assert_eq!(wm.log_window_placement(app.handle(), "main"), Some(last));
+        *wm.logs_frame.lock().unwrap() = Some(frame(90.0, 100.0, 800.0, 500.0));
+        wm.save_logs_frame();
+        assert_eq!(
+            window_state::read_logs(&state_path(&scratch)),
+            Some(frame(90.0, 100.0, 800.0, 500.0))
+        );
+    }
+
+    #[test]
+    fn a_log_window_close_saves_its_frame_without_erasing_main() {
+        let scratch = Scratch::new();
+        let (app, wm) = on_one_monitor(&scratch);
+        let main = saved(frame(300.0, 250.0, 1200.0, 760.0), false);
+        save(&scratch, &main);
+        window(&app, "logs-1");
+        let moved = frame(90.0, 100.0, 800.0, 500.0);
+        wm.remember_log_frame(moved, false);
+        wm.log_window_moved(app.handle(), "logs-1"); // mock reports a zero-size frame
+        wm.log_window_moved(app.handle(), "logs-99"); // closed or missing
+        assert_eq!(*wm.logs_frame.lock().unwrap(), Some(moved));
+        wm.remember_log_frame(frame(140.0, 150.0, 900.0, 600.0), true);
+        assert_eq!(
+            *wm.logs_frame.lock().unwrap(),
+            Some(moved),
+            "maximized is not a normal frame"
+        );
+        wm.remember_log_frame(frame(140.0, 150.0, 900.0, 0.0), false);
+        assert_eq!(
+            *wm.logs_frame.lock().unwrap(),
+            Some(moved),
+            "empty height is not a frame"
+        );
+        wm.log_window_destroyed("logs-1");
+        assert_eq!(window_state::read_logs(&state_path(&scratch)), Some(moved));
+        assert_eq!(window_state::read(&state_path(&scratch)), Some(main));
+    }
+
+    #[test]
+    fn a_log_window_keeps_the_saved_size_but_falls_back_from_a_missing_monitor() {
+        let scratch = Scratch::new();
+        let (app, wm) = on_one_monitor(&scratch);
+        window(&app, "main");
+        window_state::write_logs(&state_path(&scratch), &frame(2500.0, 80.0, 800.0, 500.0))
+            .unwrap();
+
+        assert_eq!(
+            wm.log_window_placement(app.handle(), "main"),
+            Some(frame(28.0, 28.0, 800.0, 500.0))
+        );
+    }
+
+    #[test]
+    fn a_log_window_restores_a_position_on_a_second_monitor() {
+        let scratch = Scratch::new();
+        let monitors = vec![
+            monitor((0, 0, 1920, 1080), 1.0),
+            monitor((1920, 0, 1920, 1080), 1.0),
+        ];
+        let (app, wm) = on(monitors, &scratch);
+        window(&app, "main");
+        let last = frame(2200.0, 100.0, 900.0, 600.0);
+        window_state::write_logs(&state_path(&scratch), &last).unwrap();
+
+        assert_eq!(wm.log_window_placement(app.handle(), "main"), Some(last));
+    }
+
+    #[test]
+    fn an_open_log_window_anchors_the_next_one_instead_of_the_app_window() {
+        struct LogsOnSecond(Monitor, Monitor);
+        impl super::Monitors for LogsOnSecond {
+            fn of_window(&self, label: &str) -> Option<Monitor> {
+                Some(
+                    if super::is_logs_label(label) {
+                        &self.1
+                    } else {
+                        &self.0
+                    }
+                    .clone(),
+                )
+            }
+            fn primary(&self) -> Option<Monitor> {
+                Some(self.0.clone())
+            }
+            fn all(&self) -> Vec<Monitor> {
+                vec![self.0.clone(), self.1.clone()]
+            }
+        }
+        let scratch = Scratch::new();
+        let app = mock_app(scratch.path(), SidecarService::without_process(None));
+        let wm = WindowManager::new(
+            CancellationToken::new(),
+            LogsOnSecond(
+                monitor((0, 0, 1920, 1080), 1.0),
+                monitor((1920, 0, 1920, 1080), 1.0),
+            ),
+            None,
+        );
+        window(&app, "main");
+        window(&app, "logs-1");
+        window(&app, "window-2");
+
+        assert_eq!(wm.monitors.all().len(), 2);
+        assert_eq!(
+            wm.placement(app.handle(), None, &super::LOG_WINDOW),
+            Some(frame(480.0, 220.0, 960.0, 640.0)),
+            "without an anchor, use the primary monitor"
+        );
+        assert_eq!(
+            wm.placement(app.handle(), Some("main"), &super::LOG_WINDOW),
+            Some(frame(28.0, 28.0, 960.0, 640.0)),
+            "an app anchor is on the first monitor"
+        );
+
+        *wm.logs_frame.lock().unwrap() = Some(frame(2400.0, 220.0, 800.0, 500.0));
+
+        assert_eq!(
+            wm.log_window_placement(app.handle(), "main"),
+            Some(frame(2480.0, 290.0, 800.0, 500.0))
+        );
+    }
+
+    #[test]
+    fn a_small_work_area_caps_a_saved_log_size() {
+        let scratch = Scratch::new();
+        let (app, wm) = on(vec![monitor((0, 0, 1366, 700), 1.0)], &scratch);
+        window(&app, "main");
+        *wm.logs_frame.lock().unwrap() = Some(frame(10.0, 10.0, 1300.0, 900.0));
+        assert_eq!(
+            wm.log_window_placement(app.handle(), "main"),
+            Some(frame(10.0, 10.0, 1161.1, 595.0))
+        );
     }
 
     #[test]
@@ -1721,6 +1966,21 @@ mod tests {
 
         assert!(
             out.contains("failed to save the main window's frame"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn a_log_frame_that_cannot_be_saved_is_logged() {
+        let scratch = Scratch::new();
+        let (_app, wm) = on_one_monitor(&scratch);
+        std::fs::create_dir_all(state_path(&scratch)).unwrap();
+        wm.remember_log_frame(frame(90.0, 100.0, 800.0, 500.0), false);
+
+        let out = captured(|| wm.save_logs_frame());
+
+        assert!(
+            out.contains("failed to save the log window's frame"),
             "got: {out}"
         );
     }

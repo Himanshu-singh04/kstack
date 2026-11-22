@@ -177,6 +177,7 @@ fn exited<R: Runtime>(app: &AppHandle<R>) {
     }
 
     state.window_manager.save_main_frame();
+    state.window_manager.save_logs_frame();
 
     tracing::info!("shutdown complete");
 
@@ -225,6 +226,7 @@ fn window_destroyed<R: Runtime>(app: &AppHandle<R>, label: &str) {
     log_windows::destroyed(app, label);
     if let Some(state) = app.try_state::<AppState>() {
         state.window_manager.main_window_destroyed(label);
+        state.window_manager.log_window_destroyed(label);
     }
 }
 
@@ -232,6 +234,7 @@ fn window_destroyed<R: Runtime>(app: &AppHandle<R>, label: &str) {
 fn window_moved<R: Runtime>(app: &AppHandle<R>, label: &str) {
     if let Some(state) = app.try_state::<AppState>() {
         state.window_manager.main_window_moved(app, label);
+        state.window_manager.log_window_moved(app, label);
     }
 }
 
