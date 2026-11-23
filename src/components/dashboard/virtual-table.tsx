@@ -28,17 +28,12 @@ import type { ReactNode } from 'react';
 
 import type { SortValue } from '@/lib/sort-rows';
 
-// One fact, two forms. `ROW_H_PX` is the pinned row's rendered height — `TableRow` has
-// `border-b` under collapsed table borders, so it is read off a rendered row, not derived.
-export const ROW_H = 'h-9';
-export const ROW_H_PX = 36;
+import { ROW, type RowSize } from './row-size';
 
-// A row's height, as a class and in pixels.
-export type RowSize = { className: string; px: number };
-const ROW: RowSize = { className: ROW_H, px: ROW_H_PX };
-// A row of two lines, such as a name over its owner. A row's height is only a minimum, and
-// two lines under the library's cell padding would outgrow it, so its cells carry none.
-export const TALL_ROW: RowSize = { className: 'h-11 [&>td]:py-0', px: 44 };
+// A pinned cell covers what scrolls under it, so it paints the row's hover wash over the
+// page's colour itself. Its `right` is the width of the pinned columns after it.
+const PINNED_CELL =
+  'sticky bg-background group-hover/row:bg-[color-mix(in_oklab,var(--muted)_50%,var(--background))] group-has-aria-expanded/row:bg-[color-mix(in_oklab,var(--muted)_50%,var(--background))]';
 
 // Rows rendered beyond each edge of the viewport. Also covers the one frame between a
 // scroll correction below and the `scroll` event that recomputes the window from it.
@@ -50,10 +45,6 @@ export type VirtualColumn<T> = {
   cell: (row: T) => ReactNode;
   // Applied to the header and every cell: alignment, truncation, tabular-nums.
   className?: string;
-  // The column's width in pixels. The layout is fixed, so the one column without a width
-  // takes the slack; it keeps `minWidth`, and the table scrolls sideways before it would
-  // go under it.
-  width?: number;
   minWidth?: number;
   // Left out until the user picks it in the column picker.
   hiddenByDefault?: boolean;
@@ -63,7 +54,27 @@ export type VirtualColumn<T> = {
   descFirst?: boolean;
   // Its sort value reads the clock, so its order goes stale with no new rows.
   sortsByClock?: boolean;
-};
+} & (
+  | {
+      // The column's width in pixels. The layout is fixed, so the one column without a width
+      // takes the slack; it keeps `minWidth`, and the table scrolls sideways before it would
+      // go under it.
+      width?: number;
+      pinned?: false;
+    }
+  | {
+      // Stays at the right edge while the rows scroll sideways. Pinned columns come after every
+      // other. Their header cells sit under a patch of the header's colour, so they have no
+      // header text and do not sort. Their widths are what the patch covers and what a focused
+      // header button scrolls clear of.
+      pinned: true;
+      width: number;
+      header: '';
+      sortValue?: never;
+      descFirst?: never;
+      sortsByClock?: never;
+    }
+);
 
 export type TableSort = { key: string; desc: boolean };
 
@@ -104,7 +115,8 @@ type VirtualTableProps<T> = {
   rowKey: (row: T) => string;
   columns: VirtualColumn<T>[];
   rowSize?: RowSize;
-  // Restyles the header strip.
+  // Restyles the header strip. Its background must stay opaque: the patch over the pinned
+  // columns and the scroller's bar inherits it.
   headerClassName?: string;
   // The column the caller sorted `rows` by, and the press on a sortable header.
   sort?: TableSort;
@@ -123,6 +135,7 @@ export function VirtualTable<T>({
   onSort,
 }: VirtualTableProps<T>) {
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const headerBoxRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   // The scroller's vertical bar, which the header leaves room for.
   const [gutter, setGutter] = useState(0);
@@ -170,6 +183,32 @@ export function VirtualTable<T>({
     for (let i = firstVisible; i < last; i += 1) seenRef.current.push({ key: rowKey(rows[i]), index: i });
   });
 
+  const firstPinned = columns.findIndex((c) => c.pinned);
+  if (firstPinned >= 0 && columns.slice(firstPinned).some((c) => !c.pinned)) {
+    throw new Error('VirtualTable: pinned columns must come after every other column');
+  }
+  // Each pinned column's offset from the right edge: the widths of the pinned columns after it.
+  const pinnedRight = new Map<string, number>();
+  let pinnedWidth = 0;
+  for (const c of columns.toReversed()) {
+    if (!c.pinned) break;
+    pinnedRight.set(c.key, pinnedWidth);
+    pinnedWidth += c.width;
+  }
+  // Tab can land on a header button scrolled out of view or under the pinned columns, where
+  // its focus ring cannot show: scroll the rows, which the header follows, by the least that
+  // shows the button beside them, its left edge first when it is wider than the room. Focus
+  // also scrolls the header's own clipped box, so that goes back first.
+  const revealHeaderButton = (button: HTMLElement) => {
+    const el = scrollerRef.current!;
+    headerBoxRef.current!.scrollLeft = 0;
+    const view = el.clientWidth - pinnedWidth;
+    const origin = el.getBoundingClientRect().left;
+    const { left, right } = button.getBoundingClientRect();
+    let shift = Math.max(0, right - origin - view);
+    if (left - origin - shift < 0) shift = left - origin;
+    el.scrollLeft += shift;
+  };
   const minWidth = columns.reduce((sum, c) => sum + (c.width ?? c.minWidth ?? 0), 0);
   // Both tables lay out from these: a fixed table takes its widths from its first row, which
   // in the body is a spacer.
@@ -188,7 +227,11 @@ export function VirtualTable<T>({
       It leaves room for the scroller's bar, so its box is as wide as the rows' view, and
       follows the scroller sideways by a transform: WebKit leaves the padding out of a box's
       scroll range, so a header scrolled to match would stop short at the far right. */}
-      <div className={cn('shrink-0 overflow-hidden', headerClassName)} style={{ paddingRight: gutter }}>
+      <div
+        ref={headerBoxRef}
+        className={cn('relative shrink-0 overflow-hidden bg-background', headerClassName)}
+        style={{ paddingRight: gutter }}
+      >
         <div ref={headerRef}>
           <Table role="none" className="table-fixed" containerClassName="overflow-x-visible" style={{ minWidth }}>
             {cols}
@@ -197,7 +240,13 @@ export function VirtualTable<T>({
                 {columns.map((c) => {
                   const desc = sort?.key === c.key ? sort.desc : undefined;
                   return (
-                    <TableHead key={c.key} role="columnheader" className={c.className} aria-sort={ariaSort(desc)}>
+                    <TableHead
+                      key={c.key}
+                      role="columnheader"
+                      className={c.className}
+                      aria-sort={ariaSort(desc)}
+                      onFocus={c.pinned ? undefined : (e) => revealHeaderButton(e.target)}
+                    >
                       {c.sortValue && onSort ? (
                         <SortButton label={c.header} desc={desc} onClick={() => onSort(c.key)} />
                       ) : (
@@ -210,6 +259,15 @@ export function VirtualTable<T>({
             </TableHeader>
           </Table>
         </div>
+        {/* The scroller's bar sits in the header's padding, where the scrolled header still draws. */}
+        {pinnedWidth + gutter > 0 && (
+          <div
+            data-testid="pinned-header-patch"
+            aria-hidden
+            className="absolute inset-y-0 bg-inherit"
+            style={{ right: 0, width: pinnedWidth + gutter }}
+          />
+        )}
       </div>
       <div
         ref={scrollerRef}
@@ -227,9 +285,14 @@ export function VirtualTable<T>({
           <TableBody role="rowgroup">
             <tr aria-hidden style={{ height: first * rowSize.px }} />
             {rows.slice(first, last).map((row) => (
-              <TableRow key={rowKey(row)} role="row" className={rowSize.className}>
+              <TableRow key={rowKey(row)} role="row" className={cn('group/row', rowSize.className)}>
                 {columns.map((c) => (
-                  <TableCell key={c.key} role="cell" className={c.className}>
+                  <TableCell
+                    key={c.key}
+                    role="cell"
+                    className={cn(c.className, c.pinned && PINNED_CELL)}
+                    style={c.pinned ? { right: pinnedRight.get(c.key) } : undefined}
+                  >
                     {c.cell(row)}
                   </TableCell>
                 ))}

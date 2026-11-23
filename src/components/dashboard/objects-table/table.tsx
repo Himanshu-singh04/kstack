@@ -22,9 +22,10 @@ import { Tabs, TabsList, TabsTrigger } from '@kubetail/ui/elements/tabs';
 import { cn } from '@kubetail/ui/lib/utils';
 import { useEffect, useMemo, useState } from 'react';
 
+import { TALL_ROW } from '@/components/dashboard/row-size';
 import { HEALTH_TONE } from '@/components/dashboard/status-pill';
 import type { StatusTone } from '@/components/dashboard/status-pill';
-import { TALL_ROW, VirtualTable } from '@/components/dashboard/virtual-table';
+import { VirtualTable } from '@/components/dashboard/virtual-table';
 import type { TableSort, VirtualColumn } from '@/components/dashboard/virtual-table';
 import { SearchBox } from '@/components/primitives/text-entry';
 import { VisibleText } from '@/components/primitives/visible-text';
@@ -301,7 +302,9 @@ export function ObjectsTable({
         </div>
       </div>
       {/* A tab or a query that leaves no row draws the table empty, its footer counting zero. */}
-      <div className={cn('flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card shadow-sm', CELLS)}>
+      <div
+        className={cn('flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-background shadow-sm', CELLS)}
+      >
         <VirtualTable
           rows={rows}
           rowKey={rowKey}
