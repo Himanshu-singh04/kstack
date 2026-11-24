@@ -948,6 +948,17 @@ risk stays distinguishable from an unnoticed one, and is not repeated here.
   `background-color` leaves the theme-matching foreground open; a contrast floor on every kept
   colour would close it. Either land one or accept it as a **By decision** row with an ADR.
 
+- **Let a link lead a Windows layout folder out of the profile (low; sidecar and host owners).**
+  A layout folder a link leads elsewhere must resolve inside the user profile, whose ACL keeps
+  it private
+  ([ADR](adr/2026-11-24-follow-a-link-to-a-kstack-folder-once-at-start-and-refuse-one-below-it.md)).
+  A junction to another drive fails the start until Kstack sets an ACL on such a folder itself.
+
+- **Check who can write the folders above Kstack's own (low; sidecar owner).** Kstack assumes
+  every folder on the path to a layout folder, and to a link's target, is writable only by the
+  user or root, and checks only the Unix runtime folder. A root under a folder another account
+  can write lets that account repoint a link Kstack follows.
+
 - **Measure what a run's check costs (easy; sandbox owner).** A run's check names each rule path
   as the kernel does (`Policy.compile`, `sidecar/internal/run/sandbox/policy.go`): Linux follows
   its links, macOS asks the kernel for its full path, and the check for a folder named two ways

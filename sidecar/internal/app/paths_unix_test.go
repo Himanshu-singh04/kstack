@@ -23,55 +23,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/kstackhq/kstack/sidecar/internal/lib/realpath"
 )
 
-// A subfolder linked elsewhere joins the fence, so the files it leads to are
-// Kstack's for every fence; one that is a folder adds nothing.
-func TestALinkedSubfolderIsFenced(t *testing.T) {
-	newConfig := func() (string, Config) {
-		root := t.TempDir()
-		return root, Config{
-			DataDir:    filepath.Join(root, "data"),
-			CacheDir:   filepath.Join(root, "cache"),
-			RuntimeDir: filepath.Join(root, "runtime"),
-		}
-	}
-	for _, sub := range []string{
-		"data/chats", "data/monitor",
-		"cache/logs", "cache/kube", "cache/tmp", "cache/kubectl",
-		"runtime/shell", "runtime/runs",
-	} {
-		root, cfg := newConfig()
-		link := filepath.Join(root, sub)
-		elsewhere := t.TempDir()
-		require.NoError(t, os.Mkdir(filepath.Dir(link), 0o700))
-		require.NoError(t, os.Symlink(elsewhere, link))
+// Logs linked out of the state keep an entry of their own, as their target.
+func TestLogsLinkedOutOfTheStateAreFencedAtTheirTarget(t *testing.T) {
+	root := scratch(t)
+	n := linuxNamed(root)
+	target := filepath.Join(root, "mnt", "logs")
+	require.NoError(t, os.MkdirAll(target, 0o700))
+	require.NoError(t, os.MkdirAll(n.Layout.State, 0o700))
+	symlink(t, target, n.Layout.Logs)
 
-		denied := pathsOf(cfg).Bash.DeniedDirs
-		assert.Equal(t, []string{cfg.DataDir, cfg.CacheDir, cfg.RuntimeDir, link}, denied)
-		assert.True(t, realpath.UnderAny(realpath.Resolved(filepath.Join(elsewhere, "x")), realpath.ResolvedAll(denied)), sub)
-	}
+	f, err := ResolveFolders(n)
 
-	root, cfg := newConfig()
-	require.NoError(t, os.MkdirAll(filepath.Join(root, "cache/kube"), 0o700))
-	assert.Equal(t, []string{cfg.DataDir, cfg.CacheDir, cfg.RuntimeDir}, pathsOf(cfg).Bash.DeniedDirs)
-}
-
-// A subfolder whose Lstat fails for any reason but absence may be a link, so
-// it joins the fence. A root that is a file fails it with ENOTDIR.
-func TestASubfolderThatCannotBeReadIsFenced(t *testing.T) {
-	root := t.TempDir()
-	cfg := Config{
-		DataDir:    filepath.Join(root, "data"),
-		CacheDir:   filepath.Join(root, "cache"),
-		RuntimeDir: filepath.Join(root, "runtime"),
-	}
-	require.NoError(t, os.WriteFile(cfg.RuntimeDir, nil, 0o600))
-
-	assert.Equal(t, []string{
-		cfg.DataDir, cfg.CacheDir, cfg.RuntimeDir,
-		filepath.Join(cfg.RuntimeDir, "shell"), filepath.Join(cfg.RuntimeDir, "runs"),
-	}, pathsOf(cfg).Bash.DeniedDirs)
+	require.NoError(t, err)
+	assert.Contains(t, pathsOf(Config{Folders: f}).Bash.DeniedDirs, target)
 }

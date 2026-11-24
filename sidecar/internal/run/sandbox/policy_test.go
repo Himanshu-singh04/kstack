@@ -77,6 +77,8 @@ func TestAPolicyChecks(t *testing.T) {
 				Kstack: []string{p("data"), p("cache"), p("runtime")},
 				Read:   []string{p("runtime/runs/1"), p("runtime/shell/snapshot.sh")},
 				Write:  []string{p("data/chats/c/workspace"), p("cache/tmp/1")},
+				// home holds a link Kstack followed, as ~ holds a linked ~/.cache.
+				LinkParents: []string{p("home")},
 			},
 			Network: NetworkPolicy{Relays: []Relay{{Port: 6443, Socket: p("runtime/runs/1/proxy.sock")}}},
 		}
@@ -106,7 +108,16 @@ func TestAPolicyChecks(t *testing.T) {
 		"a run's own path holding a Deny path": func(q *Policy) {
 			q.Always.Deny = append(q.Always.Deny, p("runtime/runs/1/secret"))
 		},
-		"a second relay": func(q *Policy) { q.Network.Relays = append(q.Network.Relays, Relay{Port: 1, Socket: p("s")}) },
+		"a Files Write on a link parent": func(q *Policy) {
+			q.Files.Write = append(q.Files.Write, p("big"))
+			q.Always.LinkParents = append(q.Always.LinkParents, p("big"))
+		},
+		"a Files Write above a link parent": func(q *Policy) {
+			q.Files.Write = append(q.Files.Write, p("big"))
+			q.Always.LinkParents = append(q.Always.LinkParents, p("big/cache"))
+		},
+		"an Always Write above a link parent": func(q *Policy) { q.Always.LinkParents = append(q.Always.LinkParents, p("cache/tmp/1/x")) },
+		"a second relay":                      func(q *Policy) { q.Network.Relays = append(q.Network.Relays, Relay{Port: 1, Socket: p("s")}) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			q := workspace()
@@ -149,6 +160,23 @@ func TestADenyIsCompiledOnlyWhereAReadOrWriteReachesIt(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{keyrings, kube, filepath.Join(base, "srv")}, denied)
+}
+
+// A Kstack folder inside another is denied once, with the one around it.
+func TestAKstackFolderInsideAnotherIsDeniedOnce(t *testing.T) {
+	base := realpath.Resolved(t.TempDir())
+	d := mkdirs(t, base, "state/logs", "state", "data")
+	logs, state, data := d[0], d[1], d[2]
+	p := Policy{Files: FilePolicy{Read: []string{base}}, Always: AlwaysPolicy{Kstack: []string{logs, state, data}}}
+
+	var denied []string
+	for _, r := range compiledRules(t, p) {
+		if r.kind == ruleDeny {
+			denied = append(denied, r.at)
+		}
+	}
+
+	assert.Equal(t, []string{state, data}, denied)
 }
 
 func TestLimitsAreChecked(t *testing.T) {
