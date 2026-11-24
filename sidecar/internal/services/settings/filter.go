@@ -15,13 +15,13 @@
 package settings
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/kstackhq/kstack/sidecar/internal/lib/realpath"
 	"github.com/kstackhq/kstack/sidecar/internal/run/sandbox"
-	"os"
 )
 
 // pathDir is one folder filterPath kept.
@@ -30,7 +30,7 @@ type pathDir struct {
 	Target string // the folder it resolved to
 	Shared bool   // writable by a group other than an administrators' one
 
-	info os.FileInfo // the folder the filter checked, which a stored Target is compared with
+	info os.FileInfo // the folder the filter checked, which a duplicate is compared with
 }
 
 // zones is Zones as the checks read it, each path as the zones list it. A
